@@ -1,0 +1,64 @@
+# experiment-zone / experiment-controller — orchestrates runs (start/stop,
+# condition toggles, run metadata), HTTP API on 8700. Out-of-band/god-mode.
+# Placeholder image: REPLACE_ME/experiment-controller:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: experiment-controller
+  namespace: experiment-zone
+  labels:
+    app.kubernetes.io/name: experiment-controller
+    zone: experiment-zone
+    tier: experiment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: experiment-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: experiment-controller
+        zone: experiment-zone
+        tier: experiment
+    spec:
+      containers:
+        - name: controller
+          image: REPLACE_ME/experiment-controller:dev
+          ports:
+            - name: http
+              containerPort: 8700
+          env:
+            - name: LISTEN_PORT
+              value: "8700"
+            - name: REGISTRY_ENDPOINT
+              value: http://service-registry.platform-zone.svc.cluster.local:8500
+            - name: METRICS_SINK_ENDPOINT
+              value: http://metrics-sink.experiment-zone.svc.cluster.local:4318
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: experiment-controller
+  namespace: experiment-zone
+  labels:
+    app.kubernetes.io/name: experiment-controller
+    zone: experiment-zone
+    tier: experiment
+spec:
+  selector:
+    app.kubernetes.io/name: experiment-controller
+  ports:
+    - name: http
+      port: 8700
+      targetPort: http

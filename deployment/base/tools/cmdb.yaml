@@ -1,0 +1,66 @@
+# tool-zone / mcp-cmdb — MCP tool server, streamable HTTP on 7002. Internals stubbed.
+# Placeholder image: REPLACE_ME/mcp-cmdb:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-cmdb
+  namespace: tool-zone
+  labels:
+    app.kubernetes.io/name: mcp-cmdb
+    zone: tool-zone
+    tier: tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-cmdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-cmdb
+        zone: tool-zone
+        tier: tool
+    spec:
+      containers:
+        - name: server
+          image: REPLACE_ME/mcp-cmdb:dev
+          ports:
+            - name: mcp-http
+              containerPort: 7002
+          env:
+            - name: MCP_TRANSPORT
+              value: streamable-http
+            - name: MCP_LISTEN_PORT
+              value: "7002"
+            - name: TTP_ENDPOINT
+              value: https://trust-anchor.platform-zone.svc.cluster.local:8443
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          envFrom:
+            - configMapRef:
+                name: data-endpoints
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-cmdb
+  namespace: tool-zone
+  labels:
+    app.kubernetes.io/name: mcp-cmdb
+    zone: tool-zone
+    tier: tool
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-cmdb
+  ports:
+    - name: mcp-http
+      port: 7002
+      targetPort: mcp-http

@@ -1,0 +1,74 @@
+# tool-zone / mcp-containment — PRIVILEGED MCP tool server, streamable HTTP on 7006.
+# Internals stubbed. "Privileged" is a protocol-level property (requires a scoped
+# capability token, held only by the response agent) — marked here via label and
+# annotation for later policy targeting; no k8s-level privilege is granted.
+# Placeholder image: REPLACE_ME/mcp-containment:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-containment
+  namespace: tool-zone
+  labels:
+    app.kubernetes.io/name: mcp-containment
+    zone: tool-zone
+    tier: tool
+    soc-testbed.io/privileged: "true"
+  annotations:
+    soc-testbed.io/privileged: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-containment
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-containment
+        zone: tool-zone
+        tier: tool
+        soc-testbed.io/privileged: "true"
+    spec:
+      containers:
+        - name: server
+          image: REPLACE_ME/mcp-containment:dev
+          ports:
+            - name: mcp-http
+              containerPort: 7006
+          env:
+            - name: MCP_TRANSPORT
+              value: streamable-http
+            - name: MCP_LISTEN_PORT
+              value: "7006"
+            - name: TTP_ENDPOINT
+              value: https://trust-anchor.platform-zone.svc.cluster.local:8443
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          envFrom:
+            - configMapRef:
+                name: data-endpoints
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-containment
+  namespace: tool-zone
+  labels:
+    app.kubernetes.io/name: mcp-containment
+    zone: tool-zone
+    tier: tool
+    soc-testbed.io/privileged: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-containment
+  ports:
+    - name: mcp-http
+      port: 7006
+      targetPort: mcp-http

@@ -1,0 +1,61 @@
+# platform-zone / service-registry — agent/tool register + discover, on 8500.
+# Placeholder image: REPLACE_ME/service-registry:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-registry
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: service-registry
+    zone: platform-zone
+    tier: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: service-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: service-registry
+        zone: platform-zone
+        tier: platform
+    spec:
+      containers:
+        - name: registry
+          image: REPLACE_ME/service-registry:dev
+          ports:
+            - name: http
+              containerPort: 8500
+          env:
+            - name: LISTEN_PORT
+              value: "8500"
+            - name: TTP_ENDPOINT
+              value: https://trust-anchor.platform-zone.svc.cluster.local:8443
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-registry
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: service-registry
+    zone: platform-zone
+    tier: platform
+spec:
+  selector:
+    app.kubernetes.io/name: service-registry
+  ports:
+    - name: http
+      port: 8500
+      targetPort: http

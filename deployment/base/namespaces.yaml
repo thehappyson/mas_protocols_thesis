@@ -1,0 +1,40 @@
+# The five logical zones of the soc-testbed, expressed as namespaces.
+# Cross-zone traffic is OPEN BY DEFAULT (no NetworkPolicies in base) — see
+# base/kustomization.yaml and components/network-policies/ for the rationale.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-zone
+  labels:
+    zone: agent-zone
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tool-zone
+  labels:
+    zone: tool-zone
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: platform-zone
+  labels:
+    zone: platform-zone
+---
+# Deleted by overlays/minimal (data resources fold into platform-zone there).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data-zone
+  labels:
+    zone: data-zone
+---
+# Out-of-band / god-mode: experiment harness is not subject to protocol
+# overhead and is never restricted by the network-policy component.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: experiment-zone
+  labels:
+    zone: experiment-zone

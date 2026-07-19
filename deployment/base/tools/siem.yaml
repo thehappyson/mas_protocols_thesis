@@ -1,0 +1,68 @@
+# tool-zone / mcp-siem — MCP tool server, streamable HTTP on 7001. Internals stubbed.
+# Placeholder image: REPLACE_ME/mcp-siem:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-siem
+  namespace: tool-zone
+  labels:
+    app.kubernetes.io/name: mcp-siem
+    zone: tool-zone
+    tier: tool
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-siem
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-siem
+        zone: tool-zone
+        tier: tool
+    spec:
+      containers:
+        - name: server
+          image: REPLACE_ME/mcp-siem:dev
+          ports:
+            - name: mcp-http
+              containerPort: 7001
+          env:
+            - name: MCP_TRANSPORT
+              value: streamable-http
+            - name: MCP_LISTEN_PORT
+              value: "7001"
+            - name: TTP_ENDPOINT
+              value: https://trust-anchor.platform-zone.svc.cluster.local:8443
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          envFrom:
+            # Data-zone DNS comes from the shared data-endpoints ConfigMap so the
+            # minimal overlay can rewrite it in one place.
+            - configMapRef:
+                name: data-endpoints
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-siem
+  namespace: tool-zone
+  labels:
+    app.kubernetes.io/name: mcp-siem
+    zone: tool-zone
+    tier: tool
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-siem
+  ports:
+    - name: mcp-http
+      port: 7001
+      targetPort: mcp-http

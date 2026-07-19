@@ -1,0 +1,33 @@
+# platform-zone under "network-policy: on": trust anchor, registry, and otel
+# are shared infrastructure — every zone may reach them in both conditions.
+# The policy exists (rather than leaving the namespace unpoliced) so the
+# allowed set is explicit and auditable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: platform-zone-restrict-ingress
+  namespace: platform-zone
+  labels:
+    zone: platform-zone
+    app.kubernetes.io/part-of: soc-testbed
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              zone: agent-zone
+        - namespaceSelector:
+            matchLabels:
+              zone: tool-zone
+        - namespaceSelector:
+            matchLabels:
+              zone: data-zone
+        - namespaceSelector:
+            matchLabels:
+              zone: experiment-zone
+        - namespaceSelector:
+            matchLabels:
+              zone: platform-zone

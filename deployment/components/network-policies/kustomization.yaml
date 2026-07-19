@@ -1,0 +1,41 @@
+# =============================================================================
+# network-policies — OPTIONAL Kustomize Component. OFF BY DEFAULT.
+#
+# This component is deliberately NOT included by base/ or overlays/minimal/.
+# "Network policy on/off" is an EXPERIMENTAL VARIABLE of the testbed:
+#
+#   * OFF (default): cross-zone traffic is open, so agents can *attempt* direct
+#     data-zone access and the protocol layer's (MCP/A2A/ANP) enforcement is
+#     the only control being measured.
+#   * ON: include this component from an overlay to close the network path and
+#     measure the condition where infrastructure, not protocol, does the gating.
+#
+# To turn it ON, add to an overlay's kustomization.yaml:
+#
+#   components:
+#     - ../../components/network-policies
+#
+# COMPATIBILITY NOTE: these policies assume the full 5-zone base topology
+# (they select the data-zone namespace). overlays/minimal folds data-zone into
+# platform-zone and is non-reportable anyway — do NOT combine this component
+# with minimal without adapting data-zone-policies.yaml first.
+#
+# CNI ENFORCEMENT — MUST BE VERIFIED: NetworkPolicy objects are silently inert
+# unless the cluster's CNI enforces them (Calico, Cilium, ... do; plain
+# flannel/kubenet do NOT — TODO: confirm what the Hyperstack cluster runs).
+# Verification recipe: include this component, then from an agent pod try
+#   nc -zv postgres-operational.data-zone.svc.cluster.local 5432
+# It must TIME OUT with the component on and CONNECT with it off. If it
+# connects in both conditions the CNI is not enforcing and the "network-policy
+# on" experimental condition is invalid.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - data-zone-policies.yaml
+  - tool-zone-policies.yaml
+  - agent-zone-policies.yaml
+  - platform-zone-policies.yaml
+  # experiment-zone gets NO policies on purpose: it is out-of-band/god-mode
+  # and must never be restricted, in either experimental condition.

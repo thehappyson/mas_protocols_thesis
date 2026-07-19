@@ -1,0 +1,104 @@
+# platform-zone / otel-collector — OTLP ingest for all zones, gRPC on 4317.
+# Image: official upstream collector (sensible default, confirm/pin as needed).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: otel-collector
+    zone: platform-zone
+    tier: platform
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    processors:
+      batch: {}
+    exporters:
+      debug:
+        verbosity: basic
+      # TODO: forward to the experiment-zone metrics sink once its ingest API
+      # is fixed, e.g.:
+      # otlphttp:
+      #   endpoint: http://metrics-sink.experiment-zone.svc.cluster.local:4318
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: otel-collector
+    zone: platform-zone
+    tier: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+        zone: platform-zone
+        tier: platform
+    spec:
+      containers:
+        - name: collector
+          # Default chosen (official contrib image) — confirm/pin version.
+          image: otel/opentelemetry-collector-contrib:0.115.0
+          args: ["--config=/etc/otel/config.yaml"]
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: otel-collector
+    zone: platform-zone
+    tier: platform
+spec:
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc

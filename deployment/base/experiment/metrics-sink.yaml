@@ -1,0 +1,61 @@
+# experiment-zone / metrics-sink — collects run metrics/results, OTLP-HTTP-style
+# ingest on 4318. Out-of-band/god-mode; may read the audit DB for analysis.
+# Placeholder image: REPLACE_ME/metrics-sink:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-sink
+  namespace: experiment-zone
+  labels:
+    app.kubernetes.io/name: metrics-sink
+    zone: experiment-zone
+    tier: experiment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: metrics-sink
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: metrics-sink
+        zone: experiment-zone
+        tier: experiment
+    spec:
+      containers:
+        - name: sink
+          image: REPLACE_ME/metrics-sink:dev
+          ports:
+            - name: ingest
+              containerPort: 4318
+          env:
+            - name: LISTEN_PORT
+              value: "4318"
+          envFrom:
+            - configMapRef:
+                name: data-endpoints
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-sink
+  namespace: experiment-zone
+  labels:
+    app.kubernetes.io/name: metrics-sink
+    zone: experiment-zone
+    tier: experiment
+spec:
+  selector:
+    app.kubernetes.io/name: metrics-sink
+  ports:
+    - name: ingest
+      port: 4318
+      targetPort: ingest

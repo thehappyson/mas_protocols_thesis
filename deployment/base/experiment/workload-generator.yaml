@@ -1,0 +1,42 @@
+# experiment-zone / workload-generator — injects synthetic SOC workload (alerts)
+# into the agent pipeline. Out-of-band/god-mode: not subject to protocol overhead.
+# Placeholder image: REPLACE_ME/workload-generator:dev
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workload-generator
+  namespace: experiment-zone
+  labels:
+    app.kubernetes.io/name: workload-generator
+    zone: experiment-zone
+    tier: experiment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: workload-generator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: workload-generator
+        zone: experiment-zone
+        tier: experiment
+    spec:
+      containers:
+        - name: generator
+          image: REPLACE_ME/workload-generator:dev
+          env:
+            - name: TRIAGE_AGENT_ENDPOINT
+              value: http://triage-agent.agent-zone.svc.cluster.local:9101
+            - name: EXPERIMENT_CONTROLLER_ENDPOINT
+              value: http://experiment-controller.experiment-zone.svc.cluster.local:8700
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

@@ -1,0 +1,135 @@
+# data-zone / postgres-audit — SEPARATE audit instance on 5433, append-only intent.
+# Agents/tools get a write-only (INSERT-only) role; only the experiment harness
+# and offline analysis read from it. Enforcement of append-only semantics
+# (no UPDATE/DELETE grants, no table ownership for writers) is sketched in the
+# init script below and must be finished when the schema exists. TODO.
+# Image: official postgres (sensible default, confirm/pin as needed).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-audit-credentials
+  namespace: data-zone
+  labels:
+    app.kubernetes.io/name: postgres-audit
+    zone: data-zone
+    tier: data
+type: Opaque
+stringData:
+  # TODO: replace before any shared deployment — dev-only placeholders.
+  POSTGRES_USER: audit_admin
+  POSTGRES_PASSWORD: TODO-REPLACE-ME-dev-only
+  # Password for the INSERT-only role used by agents/tools. TODO: replace.
+  AUDIT_WRITER_PASSWORD: TODO-REPLACE-ME-dev-only
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-audit-init
+  namespace: data-zone
+  labels:
+    app.kubernetes.io/name: postgres-audit
+    zone: data-zone
+    tier: data
+data:
+  # Stub: runs once on first initdb. Grants INSERT only — no SELECT/UPDATE/DELETE
+  # for the writer role. Extend with real tables + default privileges when the
+  # audit schema is defined. TODO.
+  01-audit-writer-role.sql: |
+    CREATE ROLE audit_writer LOGIN PASSWORD 'TODO-REPLACE-ME-dev-only';
+    CREATE SCHEMA IF NOT EXISTS audit;
+    GRANT USAGE ON SCHEMA audit TO audit_writer;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA audit GRANT INSERT ON TABLES TO audit_writer;
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-audit
+  namespace: data-zone
+  labels:
+    app.kubernetes.io/name: postgres-audit
+    zone: data-zone
+    tier: data
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres-audit
+  ports:
+    - name: postgres
+      port: 5433
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-audit
+  namespace: data-zone
+  labels:
+    app.kubernetes.io/name: postgres-audit
+    zone: data-zone
+    tier: data
+spec:
+  serviceName: postgres-audit
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres-audit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-audit
+        zone: data-zone
+        tier: data
+    spec:
+      containers:
+        - name: postgres
+          # Default chosen (official image) — confirm/pin version.
+          image: postgres:16
+          ports:
+            - name: postgres
+              containerPort: 5433
+          env:
+            - name: POSTGRES_DB
+              value: soc_audit
+            # Distinct port so the two instances are never conflated, even
+            # when the minimal overlay folds both into platform-zone.
+            - name: PGPORT
+              value: "5433"
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          envFrom:
+            - secretRef:
+                name: postgres-audit-credentials
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-audit-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: postgres-audit
+          zone: data-zone
+          tier: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # TODO(Hyperstack): set the correct storageClassName for the target
+        # cluster. Left unset so the cluster default class is used — flagging
+        # this as a commented sensible default, not a decision.
+        # storageClassName: REPLACE_ME-hyperstack-storage-class
+        resources:
+          requests:
+            storage: 10Gi

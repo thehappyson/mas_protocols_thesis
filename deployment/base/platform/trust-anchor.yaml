@@ -1,0 +1,86 @@
+# platform-zone / trust-anchor — TTP: root-of-trust + revocation ONLY, on 8443.
+# NOT a per-call validator: capability tokens are carried-chain and
+# offline-verifiable; peers hit this service for issuance/root material and
+# revocation checks, never on the per-call hot path.
+# Placeholder image: REPLACE_ME/trust-anchor:dev
+apiVersion: v1
+kind: Secret
+metadata:
+  name: trust-anchor-tls
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: trust-anchor
+    zone: platform-zone
+    tier: platform
+type: Opaque
+stringData:
+  # TODO: replace with real key material (or switch to cert-manager / mounted
+  # certs). Placeholder values only so the manifest is complete — NOT credentials.
+  tls.crt: "TODO-REPLACE-ME-placeholder-cert"
+  tls.key: "TODO-REPLACE-ME-placeholder-key"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trust-anchor
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: trust-anchor
+    zone: platform-zone
+    tier: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: trust-anchor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trust-anchor
+        zone: platform-zone
+        tier: platform
+    spec:
+      containers:
+        - name: ttp
+          image: REPLACE_ME/trust-anchor:dev
+          ports:
+            - name: https
+              containerPort: 8443
+          env:
+            - name: LISTEN_PORT
+              value: "8443"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/trust-anchor/tls
+              readOnly: true
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: tls
+          secret:
+            secretName: trust-anchor-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: trust-anchor
+  namespace: platform-zone
+  labels:
+    app.kubernetes.io/name: trust-anchor
+    zone: platform-zone
+    tier: platform
+spec:
+  selector:
+    app.kubernetes.io/name: trust-anchor
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https

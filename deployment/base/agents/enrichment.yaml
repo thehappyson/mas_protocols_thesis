@@ -1,0 +1,97 @@
+# agent-zone / enrichment-agent — A2A server on 9102, MCP+A2A client, LLM sidecar.
+# Placeholder images: REPLACE_ME/soc-enrichment-agent:dev, REPLACE_ME/inference-runtime:dev
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: enrichment-agent-config
+  namespace: agent-zone
+  labels:
+    app.kubernetes.io/name: enrichment-agent
+    zone: agent-zone
+    tier: agent
+data:
+  # TODO: pin the actual model for this agent (one model per agent, by design).
+  MODEL_NAME: "llama3.1:8b"
+  # Ollama sidecar default. If the sidecar is vLLM, use http://localhost:8000/v1. TODO: decide runtime.
+  INFERENCE_ENDPOINT: "http://localhost:11434"
+  A2A_LISTEN_PORT: "9102"
+  REGISTRY_ENDPOINT: "http://service-registry.platform-zone.svc.cluster.local:8500"
+  TTP_ENDPOINT: "https://trust-anchor.platform-zone.svc.cluster.local:8443"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.platform-zone.svc.cluster.local:4317"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: enrichment-agent
+  namespace: agent-zone
+  labels:
+    app.kubernetes.io/name: enrichment-agent
+    zone: agent-zone
+    tier: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: enrichment-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: enrichment-agent
+        zone: agent-zone
+        tier: agent
+    spec:
+      containers:
+        - name: agent
+          image: REPLACE_ME/soc-enrichment-agent:dev
+          ports:
+            - name: a2a
+              containerPort: 9102
+          envFrom:
+            - configMapRef:
+                name: enrichment-agent-config
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+        - name: inference
+          # Ollama or vLLM — decide and pin. TODO: GPU scheduling / Hyperstack
+          # node pool (nodeSelector + resources."nvidia.com/gpu") not set yet.
+          image: REPLACE_ME/inference-runtime:dev
+          ports:
+            - name: inference
+              containerPort: 11434
+          env:
+            - name: MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: enrichment-agent-config
+                  key: MODEL_NAME
+          # Unprofiled guesses — tune after first load tests.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: enrichment-agent
+  namespace: agent-zone
+  labels:
+    app.kubernetes.io/name: enrichment-agent
+    zone: agent-zone
+    tier: agent
+spec:
+  selector:
+    app.kubernetes.io/name: enrichment-agent
+  ports:
+    - name: a2a
+      port: 9102
+      targetPort: a2a
