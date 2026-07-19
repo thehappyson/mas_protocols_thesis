@@ -1,0 +1,202 @@
+<svg width="1200" height="840" viewBox="0 0 1200 840" xmlns="http://www.w3.org/2000/svg" font-family="Inter, -apple-system, system-ui, 'Segoe UI', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#1f2937"/>
+    </marker>
+    <marker id="arrow-ctrl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#94a3b8"/>
+    </marker>
+    <style>
+      .plane-border { fill: none; stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 5 4; }
+      .plane-label { fill: #64748b; font-size: 13px; font-weight: 500; letter-spacing: 0.2px; }
+      .title { font-size: 14px; font-weight: 500; }
+      .subtitle { font-size: 11px; font-weight: 400; opacity: 0.78; }
+      .box-exp { fill: #f8fafc; stroke: #64748b; stroke-width: 1.2; }
+      .t-exp { fill: #0f172a; }
+      .box-agent { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.2; }
+      .t-agent { fill: #1e3a8a; }
+      .box-tool { fill: #ecfdf5; stroke: #10b981; stroke-width: 1.2; }
+      .t-tool { fill: #064e3b; }
+      .box-sup { fill: #f5f3ff; stroke: #8b5cf6; stroke-width: 1.2; }
+      .t-sup { fill: #4c1d95; }
+      .box-data { fill: #fffbeb; stroke: #f59e0b; stroke-width: 1.2; }
+      .t-data { fill: #78350f; }
+      .arrow { fill: none; stroke: #1f2937; stroke-width: 1.5; }
+      .arrow-ctrl { fill: none; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 5 3; }
+      .alabel { font-size: 11px; fill: #1f2937; font-weight: 500; }
+      .alabel-ctrl { font-size: 11px; fill: #64748b; font-weight: 500; font-style: italic; }
+      .alabel-bg { fill: #ffffff; }
+      .title-text { font-size: 17px; font-weight: 600; fill: #0f172a; }
+      .subtitle-text { font-size: 12px; fill: #64748b; }
+      .note-text { font-size: 11px; fill: #64748b; font-style: italic; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="840" fill="#ffffff"/>
+
+  <text class="title-text" x="30" y="28">SOC multi-agent system — functional architecture</text>
+  <text class="subtitle-text" x="30" y="46">v2 · components, interfaces, protocols (no deployment specifics)</text>
+
+  <rect class="plane-border" x="30" y="70" width="1140" height="80" rx="8"/>
+  <text class="plane-label" x="45" y="89">Experiment plane</text>
+
+  <rect class="box-exp" x="80" y="98" width="320" height="44" rx="4"/>
+  <text class="title t-exp" x="240" y="119" text-anchor="middle">Workload generator</text>
+  <text class="subtitle t-exp" x="240" y="135" text-anchor="middle">replays alerts → relational DB</text>
+
+  <rect class="box-exp" x="440" y="98" width="320" height="44" rx="4"/>
+  <text class="title t-exp" x="600" y="119" text-anchor="middle">Attack injection harness</text>
+  <text class="subtitle t-exp" x="600" y="135" text-anchor="middle">swaps tools · forges tokens · adds rogue agents</text>
+
+  <rect class="box-exp" x="800" y="98" width="320" height="44" rx="4"/>
+  <text class="title t-exp" x="960" y="119" text-anchor="middle">Experiment controller</text>
+  <text class="subtitle t-exp" x="960" y="135" text-anchor="middle">toggles protocol config · collects metrics</text>
+
+  <rect class="plane-border" x="30" y="190" width="180" height="170" rx="8"/>
+  <text class="plane-label" x="45" y="209">Inference</text>
+
+  <rect class="box-sup" x="50" y="230" width="140" height="110" rx="4"/>
+  <text class="title t-sup" x="120" y="254" text-anchor="middle">Local LLM pool</text>
+  <text class="subtitle t-sup" x="120" y="275" text-anchor="middle">Ollama / vLLM</text>
+  <text class="subtitle t-sup" x="120" y="292" text-anchor="middle">model pinned per agent</text>
+  <text class="subtitle t-sup" x="120" y="318" text-anchor="middle" font-style="italic">OpenAI-compatible HTTP</text>
+
+  <rect class="plane-border" x="240" y="190" width="720" height="170" rx="8"/>
+  <text class="plane-label" x="255" y="209">Agent plane</text>
+
+  <rect class="box-agent" x="260" y="246" width="120" height="80" rx="4"/>
+  <text class="title t-agent" x="320" y="273" text-anchor="middle">Triage</text>
+  <text class="subtitle t-agent" x="320" y="291" text-anchor="middle">classify</text>
+  <text class="subtitle t-agent" x="320" y="307" text-anchor="middle">route / delegate</text>
+
+  <rect class="box-agent" x="400" y="246" width="120" height="80" rx="4"/>
+  <text class="title t-agent" x="460" y="273" text-anchor="middle">Enrichment</text>
+  <text class="subtitle t-agent" x="460" y="291" text-anchor="middle">IOC reputation</text>
+  <text class="subtitle t-agent" x="460" y="307" text-anchor="middle">CMDB lookup</text>
+
+  <rect class="box-agent" x="540" y="246" width="120" height="80" rx="4"/>
+  <text class="title t-agent" x="600" y="273" text-anchor="middle">Correlation</text>
+  <text class="subtitle t-agent" x="600" y="291" text-anchor="middle">cross-event</text>
+  <text class="subtitle t-agent" x="600" y="307" text-anchor="middle">pattern analysis</text>
+
+  <rect class="box-agent" x="680" y="246" width="120" height="80" rx="4"/>
+  <text class="title t-agent" x="740" y="273" text-anchor="middle">Response</text>
+  <text class="subtitle t-agent" x="740" y="291" text-anchor="middle">recommend</text>
+  <text class="subtitle t-agent" x="740" y="307" text-anchor="middle">contain (scoped)</text>
+
+  <rect class="box-agent" x="820" y="246" width="120" height="80" rx="4"/>
+  <text class="title t-agent" x="880" y="273" text-anchor="middle">Reporter</text>
+  <text class="subtitle t-agent" x="880" y="291" text-anchor="middle">summarize</text>
+  <text class="subtitle t-agent" x="880" y="307" text-anchor="middle">write ticket</text>
+
+  <path d="M 320 246 Q 600 218 880 246" class="arrow" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <rect class="alabel-bg" x="555" y="217" width="90" height="14" rx="2"/>
+  <text class="alabel" x="600" y="228" text-anchor="middle">A2A peer-to-peer</text>
+
+  <rect class="plane-border" x="990" y="190" width="180" height="170" rx="8"/>
+  <text class="plane-label" x="1005" y="209">Identity &amp; trust</text>
+
+  <rect class="box-sup" x="1010" y="232" width="140" height="50" rx="4"/>
+  <text class="title t-sup" x="1080" y="254" text-anchor="middle">Trust service</text>
+  <text class="subtitle t-sup" x="1080" y="270" text-anchor="middle">issue · validate · delegate</text>
+
+  <rect class="box-sup" x="1010" y="294" width="140" height="50" rx="4"/>
+  <text class="title t-sup" x="1080" y="316" text-anchor="middle">Service registry</text>
+  <text class="subtitle t-sup" x="1080" y="332" text-anchor="middle">register · discover</text>
+
+  <rect class="plane-border" x="240" y="400" width="720" height="180" rx="8"/>
+  <text class="plane-label" x="255" y="419">MCP tool plane</text>
+
+  <rect class="box-tool" x="260" y="440" width="215" height="55" rx="4"/>
+  <text class="title t-tool" x="367" y="465" text-anchor="middle">SIEM</text>
+  <text class="subtitle t-tool" x="367" y="482" text-anchor="middle">next_alerts(since, limit)</text>
+
+  <rect class="box-tool" x="495" y="440" width="215" height="55" rx="4"/>
+  <text class="title t-tool" x="602" y="465" text-anchor="middle">CMDB</text>
+  <text class="subtitle t-tool" x="602" y="482" text-anchor="middle">asset · user lookup</text>
+
+  <rect class="box-tool" x="730" y="440" width="215" height="55" rx="4"/>
+  <text class="title t-tool" x="837" y="465" text-anchor="middle">Threat intel</text>
+  <text class="subtitle t-tool" x="837" y="482" text-anchor="middle">IOC reputation lookup</text>
+
+  <rect class="box-tool" x="260" y="510" width="215" height="55" rx="4"/>
+  <text class="title t-tool" x="367" y="535" text-anchor="middle">Runbook</text>
+  <text class="subtitle t-tool" x="367" y="552" text-anchor="middle">RAG over ATT&amp;CK + procs</text>
+
+  <rect class="box-tool" x="495" y="510" width="215" height="55" rx="4"/>
+  <text class="title t-tool" x="602" y="535" text-anchor="middle">Ticketing</text>
+  <text class="subtitle t-tool" x="602" y="552" text-anchor="middle">incident CRUD</text>
+
+  <rect class="box-tool" x="730" y="510" width="215" height="55" rx="4"/>
+  <text class="title t-tool" x="837" y="535" text-anchor="middle">Containment</text>
+  <text class="subtitle t-tool" x="837" y="552" text-anchor="middle">firewall / IAM stubs (privileged)</text>
+
+  <rect class="plane-border" x="240" y="620" width="720" height="140" rx="8"/>
+  <text class="plane-label" x="255" y="639">Data plane</text>
+
+  <rect class="box-data" x="260" y="660" width="215" height="80" rx="4"/>
+  <text class="title t-data" x="367" y="687" text-anchor="middle">Relational DB</text>
+  <text class="subtitle t-data" x="367" y="705" text-anchor="middle">alerts · IOCs · assets</text>
+  <text class="subtitle t-data" x="367" y="721" text-anchor="middle">incidents · runbook index</text>
+
+  <rect class="box-data" x="495" y="660" width="215" height="80" rx="4"/>
+  <text class="title t-data" x="602" y="687" text-anchor="middle">Audit log store</text>
+  <text class="subtitle t-data" x="602" y="705" text-anchor="middle">append-only</text>
+  <text class="subtitle t-data" x="602" y="721" text-anchor="middle">isolated from operational DB</text>
+
+  <rect class="box-data" x="730" y="660" width="215" height="80" rx="4"/>
+  <text class="title t-data" x="837" y="687" text-anchor="middle">Graph DB</text>
+  <text class="subtitle t-data" x="837" y="705" text-anchor="middle">trust / capability graph</text>
+  <text class="subtitle t-data" x="837" y="721" text-anchor="middle">delegation chains</text>
+
+  <rect class="plane-border" x="990" y="620" width="180" height="140" rx="8"/>
+  <text class="plane-label" x="1005" y="639">Observability</text>
+
+  <rect class="box-sup" x="1010" y="660" width="140" height="80" rx="4"/>
+  <text class="title t-sup" x="1080" y="687" text-anchor="middle">OpenTelemetry</text>
+  <text class="subtitle t-sup" x="1080" y="705" text-anchor="middle">collector</text>
+  <text class="subtitle t-sup" x="1080" y="721" text-anchor="middle" font-style="italic">traces + metrics from all</text>
+
+  <path class="arrow" d="M 240 286 L 190 286" marker-end="url(#arrow)"/>
+  <rect class="alabel-bg" x="198" y="274" width="40" height="14" rx="2"/>
+  <text class="alabel" x="218" y="285" text-anchor="middle">HTTP</text>
+
+  <path class="arrow" d="M 960 257 L 1010 257" marker-end="url(#arrow)"/>
+  <rect class="alabel-bg" x="965" y="246" width="40" height="14" rx="2"/>
+  <text class="alabel" x="985" y="257" text-anchor="middle">REST</text>
+
+  <path class="arrow" d="M 960 319 L 1010 319" marker-end="url(#arrow)"/>
+  <rect class="alabel-bg" x="965" y="308" width="40" height="14" rx="2"/>
+  <text class="alabel" x="985" y="319" text-anchor="middle">REST</text>
+
+  <path class="arrow" d="M 600 360 L 600 400" marker-end="url(#arrow)"/>
+  <rect class="alabel-bg" x="608" y="372" width="34" height="14" rx="2"/>
+  <text class="alabel" x="625" y="383" text-anchor="middle">MCP</text>
+
+  <path class="arrow" d="M 600 580 L 600 620" marker-end="url(#arrow)"/>
+  <rect class="alabel-bg" x="608" y="593" width="76" height="14" rx="2"/>
+  <text class="alabel" x="646" y="604" text-anchor="middle">SQL drivers</text>
+
+  <path class="arrow" d="M 1010 275 L 970 275 L 970 600 L 837 600 L 837 660" marker-end="url(#arrow)"/>
+  <rect class="alabel-bg" x="945" y="425" width="50" height="14" rx="2"/>
+  <text class="alabel" x="970" y="436" text-anchor="middle">Cypher</text>
+
+  <path class="arrow-ctrl" d="M 240 142 L 240 175 L 15 175 L 15 645 L 367 645 L 367 660" marker-end="url(#arrow-ctrl)"/>
+  <rect class="alabel-bg" x="22" y="595" width="80" height="14" rx="2"/>
+  <text class="alabel-ctrl" x="62" y="606" text-anchor="middle">writes alerts</text>
+
+  <path class="arrow-ctrl" d="M 530 142 L 530 400" marker-end="url(#arrow-ctrl)"/>
+  <rect class="alabel-bg" x="540" y="168" width="80" height="14" rx="2"/>
+  <text class="alabel-ctrl" x="580" y="179" text-anchor="middle">swaps tools</text>
+
+  <path class="arrow-ctrl" d="M 1120 142 L 1120 175 L 1185 175 L 1185 690 L 1150 690" marker-end="url(#arrow-ctrl)"/>
+  <rect class="alabel-bg" x="1155" y="385" width="50" height="14" rx="2"/>
+  <text class="alabel-ctrl" x="1180" y="396" text-anchor="middle">metrics</text>
+
+  <text class="plane-label" x="30" y="800">Legend</text>
+  <line x1="30" y1="816" x2="60" y2="816" stroke="#1f2937" stroke-width="1.5"/>
+  <text class="alabel" x="68" y="820">functional interface (protocol-labeled)</text>
+  <line x1="320" y1="816" x2="350" y2="816" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="5 3"/>
+  <text class="alabel-ctrl" x="358" y="820">experimental control / data seeding</text>
+  <text class="note-text" x="640" y="820">Observability lines omitted — every component emits to the OTel collector.</text>
+</svg>
