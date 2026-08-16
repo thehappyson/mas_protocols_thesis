@@ -28,12 +28,16 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pathlib
+import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Iterable
 
 import httpx
 import uvicorn
+import yaml
 from mcp import Client as MCPClient
 from openai import AsyncOpenAI
 from starlette.applications import Starlette
@@ -69,6 +73,8 @@ __all__ = [
     "Delegation",
     "LlmToolLoopExecutor",
     "MAX_TOOL_ITERATIONS",
+    "Workflow",
+    "WorkflowExecutor",
     "build_agent_card",
     "build_app",
     "listen_config",
@@ -88,6 +94,12 @@ INFERENCE_TIMEOUT = float(os.environ.get("INFERENCE_TIMEOUT", "300"))
 # Guards against a model that keeps requesting tools forever. Counts LLM calls,
 # so the loop makes at most this many round trips before giving up.
 MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
+# Optional cap on tokens per generation. OFF by default so the reproducibility
+# contract (temperature 0, otherwise server defaults) is unchanged. Set it only
+# to bound a verbose reasoning model's runaway generations in dev — large enough
+# not to truncate normal answers. None => unlimited (default).
+_max_tok = os.environ.get("INFERENCE_MAX_TOKENS")
+INFERENCE_MAX_TOKENS = int(_max_tok) if _max_tok else None
 
 
 def listen_config(default_port: int) -> tuple[str, int, str]:
@@ -310,6 +322,7 @@ class LlmToolLoopExecutor(AgentExecutor):
                     messages=messages,
                     tools=tools,
                     temperature=0,
+                    max_tokens=INFERENCE_MAX_TOKENS,
                 )
                 choice = completion.choices[0].message
 
@@ -398,6 +411,15 @@ class LlmToolLoopExecutor(AgentExecutor):
 
     # ---- A2A lifecycle -------------------------------------------------------
 
+    async def _produce_result(self, user_text: str, updater: TaskUpdater) -> str:
+        """What this agent returns for a task. Default: just its own LLM loop.
+
+        WorkflowExecutor overrides this to run the loop AND then forward to the
+        agent's workflow-defined successor(s), so routing is not baked into the
+        loop.
+        """
+        return await self._run_tool_loop(user_text, updater)
+
     async def execute(
         self, context: RequestContext, event_queue: EventQueue
     ) -> None:
@@ -422,7 +444,7 @@ class LlmToolLoopExecutor(AgentExecutor):
         # The task stays in WORKING for the whole loop; each action emits an
         # interim status update from inside _run_tool_loop.
         try:
-            response_text = await self._run_tool_loop(user_input, updater)
+            response_text = await self._produce_result(user_input, updater)
         except Exception as exc:  # surface the cause instead of a bare error state
             await updater.failed(
                 message=updater.new_agent_message(
@@ -440,6 +462,163 @@ class LlmToolLoopExecutor(AgentExecutor):
     ) -> None:
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         await updater.cancel()
+
+
+class Workflow:
+    """The declarative delegation graph, loaded from workflows/*.yaml.
+
+    Agents consult this at runtime to resolve their next hop(s); no successor
+    identity is baked into agent code. Endpoints resolve from env (config) with
+    the file's value as the default, so the graph is editable and the addresses
+    are configurable independently.
+    """
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._d = data
+
+    @classmethod
+    def load(cls, path: str | None = None) -> "Workflow":
+        if path is None:
+            path = os.environ.get("WORKFLOW_DEF") or str(
+                pathlib.Path(__file__).resolve().parents[2]
+                / "workflows"
+                / "phishing_triage.yaml"
+            )
+        with open(path, "r", encoding="utf-8") as fh:
+            return cls(yaml.safe_load(fh))
+
+    @property
+    def name(self) -> str:
+        return self._d["name"]
+
+    @property
+    def entry(self) -> str:
+        return self._d["entry"]
+
+    @property
+    def branch_decider(self) -> str:
+        return self._d["branch"]["decider"]
+
+    def node(self, agent: str) -> dict[str, Any]:
+        return self._d["agents"][agent]
+
+    def endpoint(self, agent: str) -> str:
+        """Resolve an agent's A2A endpoint: env override, else the file default."""
+        node = self.node(agent)
+        env = node.get("endpoint_env")
+        if env and os.environ.get(env):
+            return os.environ[env]
+        return node["endpoint"]
+
+    def successors(self, agent: str, branch: str) -> list[str]:
+        return list(self.node(agent).get("routes", {}).get(branch, []))
+
+    def consult(self, agent: str) -> str | None:
+        return self.node(agent).get("consult")
+
+    def depth(self, agent: str) -> int:
+        """Nesting depth from the entry (entry = 1), over forward + consult edges."""
+        dist = {self.entry: 0}
+        queue = deque([self.entry])
+        while queue:
+            cur = queue.popleft()
+            neighbours: set[str] = set()
+            for succ_list in self.node(cur).get("routes", {}).values():
+                neighbours.update(succ_list)
+            consulted = self.consult(cur)
+            if consulted:
+                neighbours.add(consulted)
+            for nxt in neighbours:
+                if nxt not in dist:
+                    dist[nxt] = dist[cur] + 1
+                    queue.append(nxt)
+        return dist.get(agent, 0) + 1
+
+    def branch_for_severity(self, severity: str | None) -> str:
+        """Map a severity label to 'escalate' or 'benign' via the file threshold."""
+        b = self._d["branch"]
+        order = [s.lower() for s in b["severity_order"]]
+        threshold = order.index(b["escalate_at"].lower())
+        if severity is None:
+            return "escalate"  # fail toward escalation when the signal is missing
+        try:
+            rank = order.index(severity.strip().lower())
+        except ValueError:
+            return "escalate"  # unknown severity -> escalate rather than dismiss
+        return "escalate" if rank >= threshold else "benign"
+
+
+class WorkflowExecutor(LlmToolLoopExecutor):
+    """An agent that does its own LLM work, then forwards per the workflow graph.
+
+    The LLM does domain work (reasoning + this agent's tools + any gated
+    consult); ROUTING is deterministic and data-driven — the successor comes
+    from the Workflow, not the model and not hard-coded edges. This is what makes
+    the chain a genuine, reliable depth-N await-and-unwind: each agent blocks on
+    `_delegate` to its successor and the result propagates back up.
+    """
+
+    def __init__(
+        self, *, agent_name: str, workflow: Workflow, **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        self._agent_name = agent_name
+        self._workflow = workflow
+
+    def _log(self, message: str) -> None:
+        ts = f"{time.strftime('%H:%M:%S')}.{int((time.time() % 1) * 1000):03d}"
+        print(f"[wf {ts}] {self._agent_name}: {message}", flush=True)
+
+    def _branch(self, own_output: str) -> str:
+        """Which route to take. The decider parses its severity marker; the rest
+        take the 'default' edge."""
+        if self._agent_name != self._workflow.branch_decider:
+            return "default"
+        severity = None
+        for line in own_output.splitlines():
+            if line.strip().upper().startswith("SEVERITY:"):
+                severity = line.split(":", 1)[1].strip()
+                break
+        branch = self._workflow.branch_for_severity(severity)
+        self._log(f"classified severity={severity!r} -> branch={branch}")
+        return branch
+
+    async def _produce_result(self, user_text: str, updater: TaskUpdater) -> str:
+        depth = self._workflow.depth(self._agent_name)
+        self._log(f"received (depth {depth}); running local work")
+        own_output = await self._run_tool_loop(user_text, updater)
+
+        # Accumulate this agent's contribution into the running transcript that
+        # flows down the chain (so the successor sees everything upstream).
+        transcript = (
+            f"{user_text}\n\n===== {self._label} (depth {depth}) =====\n{own_output}"
+        )
+
+        branch = self._branch(own_output)
+        successors = self._workflow.successors(self._agent_name, branch)
+        if not successors:
+            self._log(f"terminal on branch '{branch}'; unwinding result up")
+            return transcript
+
+        result = transcript
+        feed = transcript
+        for succ in successors:
+            url = self._workflow.endpoint(succ)
+            succ_depth = self._workflow.depth(succ)
+            await updater.update_status(
+                TaskState.TASK_STATE_WORKING,
+                message=updater.new_agent_message(
+                    [Part(text=(
+                        f"[workflow] {self._agent_name}(depth {depth}) "
+                        f"delegating to {succ}(depth {succ_depth}); awaiting result"
+                    ))]
+                ),
+            )
+            self._log(f"delegating to {succ} (depth {succ_depth}); awaiting")
+            result = await self._delegate(url, feed)
+            self._log(f"{succ} returned; unwinding")
+            feed = result  # the next successor (if any) sees the prior's result
+        return result
 
 
 def build_app(executor: AgentExecutor, agent_card: AgentCard) -> Starlette:

@@ -24,7 +24,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from soc_agent import (  # noqa: E402
     AgentSkill,
-    LlmToolLoopExecutor,
+    Workflow,
+    WorkflowExecutor,
     build_agent_card,
     build_app,
     listen_config,
@@ -36,6 +37,8 @@ HOST, PORT, PUBLIC_URL = listen_config(default_port=9103)
 # Tool zone endpoint, configured not hardcoded.
 SIEM_MCP_ENDPOINT = os.environ.get("SIEM_MCP_ENDPOINT", "http://127.0.0.1:7001/mcp")
 
+WORKFLOW = Workflow.load()
+
 SYSTEM_PROMPT = (
     "You are a SOC correlation agent. Given an alert and any enrichment context, "
     "determine whether it is part of a larger pattern or campaign, or is "
@@ -45,8 +48,10 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_executor() -> LlmToolLoopExecutor:
-    return LlmToolLoopExecutor(
+def build_executor() -> WorkflowExecutor:
+    return WorkflowExecutor(
+        agent_name="correlation",
+        workflow=WORKFLOW,
         agent_label="Correlation",
         system_prompt=SYSTEM_PROMPT,
         mcp_endpoints=[SIEM_MCP_ENDPOINT],

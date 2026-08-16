@@ -1,0 +1,75 @@
+# =============================================================================
+# SOC delegation graph — phishing-style triage workflow (declarative).
+#
+# This file IS the topology. Agents do not hard-code who they delegate to; each
+# looks itself up here by logical name and resolves its next hop(s) at runtime.
+# Re-wire the graph, change the branch threshold, or lengthen the chain by
+# editing this file only — no agent code changes.
+#
+# Shape (escalate path is a genuine depth-4 await-and-unwind chain, not a hub):
+#
+#   triage ──escalate──▶ enrichment ──▶ correlation ──▶ response ──▶ (verification)
+#     │                     (depth 2)     (depth 3)      (depth 4)     consult, depth 5
+#     │                                                       │
+#     │◀───────────── results unwind back up ────────────────┘
+#     │
+#     ├─ after the chain returns, triage routes (no re-reasoning) ──▶ reporter
+#     └─ benign ──▶ reporter   (short-circuit: dismissal report, no chain)
+#
+# Each delegating agent BLOCKS awaiting its successor; results propagate back
+# up. Reporter always runs (incident report on escalate, dismissal on benign).
+# =============================================================================
+name: phishing-triage-v1
+entry: triage
+
+# Branch threshold — editable here, no code change. Triage's LLM ends its
+# classification with a line "SEVERITY: <one of severity_order>". An alert whose
+# severity ranks >= escalate_at enters the chain; below it is dismissed.
+branch:
+  decider: triage
+  signal: severity                     # marker Triage emits: "SEVERITY: <x>"
+  severity_order: [benign, low, medium, high, critical]
+  escalate_at: medium                  # >= medium -> escalate, else -> benign
+
+# Logical agent -> endpoint (env overrides the default) + forward routing.
+# `routes` maps a branch key to an ORDERED list of successors, each delegated to
+# in sequence (blocking) with the accumulated transcript. Chain agents use the
+# implicit "default" branch; triage uses benign/escalate.
+agents:
+  triage:
+    endpoint: http://127.0.0.1:9101
+    endpoint_env: TRIAGE_A2A_ENDPOINT
+    routes:
+      benign:   [reporter]             # short-circuit
+      escalate: [enrichment, reporter] # chain first, then route to reporter
+
+  enrichment:
+    endpoint: http://127.0.0.1:9102
+    endpoint_env: ENRICHMENT_A2A_ENDPOINT
+    routes:
+      default: [correlation]
+
+  correlation:
+    endpoint: http://127.0.0.1:9103
+    endpoint_env: CORRELATION_A2A_ENDPOINT
+    routes:
+      default: [response]
+
+  response:
+    endpoint: http://127.0.0.1:9104
+    endpoint_env: RESPONSE_A2A_ENDPOINT
+    routes:
+      default: []                      # forward-terminal
+    consult: verification              # bidirectional sub-call (gated), not a chain edge
+
+  verification:
+    endpoint: http://127.0.0.1:9106
+    endpoint_env: VERIFICATION_A2A_ENDPOINT
+    routes:
+      default: []                      # leaf (consulted by response)
+
+  reporter:
+    endpoint: http://127.0.0.1:9105
+    endpoint_env: REPORTER_A2A_ENDPOINT
+    routes:
+      default: []                      # leaf

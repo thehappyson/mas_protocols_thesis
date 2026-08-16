@@ -25,7 +25,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from soc_agent import (  # noqa: E402
     AgentSkill,
-    LlmToolLoopExecutor,
+    Workflow,
+    WorkflowExecutor,
     build_agent_card,
     build_app,
     listen_config,
@@ -40,6 +41,8 @@ THREAT_INTEL_MCP_ENDPOINT = os.environ.get(
 )
 CMDB_MCP_ENDPOINT = os.environ.get("CMDB_MCP_ENDPOINT", "http://127.0.0.1:7002/mcp")
 
+WORKFLOW = Workflow.load()
+
 SYSTEM_PROMPT = (
     "You are a SOC enrichment agent. Given an alert or set of indicators, gather "
     "context using your tools: look up IOC reputation for IPs, domains, URLs, and "
@@ -49,8 +52,10 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_executor() -> LlmToolLoopExecutor:
-    return LlmToolLoopExecutor(
+def build_executor() -> WorkflowExecutor:
+    return WorkflowExecutor(
+        agent_name="enrichment",
+        workflow=WORKFLOW,
         agent_label="Enrichment",
         system_prompt=SYSTEM_PROMPT,
         mcp_endpoints=[THREAT_INTEL_MCP_ENDPOINT, CMDB_MCP_ENDPOINT],

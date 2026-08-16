@@ -1,18 +1,17 @@
-"""Triage agent — A2A server on the shared soc_agent template.
+"""Triage agent — entry of the declarative delegation graph.
 
-First agent in the SOC testbed (see deployment/base/agents/triage.yaml, which
-deploys this as `triage-agent` on A2A port 9101).
+First agent in the SOC testbed (deployment/base/agents/triage.yaml, A2A 9101).
 
-Role: front-line triage. Reasons over an alert with the SIEM tool (MCP) and can
-delegate to the Enrichment agent (A2A) for reputation/ownership context. All the
-loop/lifecycle machinery lives in soc_agent; this file is just Triage's config,
-prompt, and card.
+Role: classify the alert and emit a severity. It does NOT choose who to delegate
+to — the workflow definition (workflows/phishing_triage.yaml) decides, based on
+the severity Triage reports against the file's threshold: at/above the threshold
+the alert enters the enrichment->correlation->response chain; below it, Triage
+short-circuits to Reporter for a dismissal. After the chain unwinds, Triage
+routes (no re-reasoning) to Reporter for the final report. All of that routing
+is data-driven in the workflow; this file only defines Triage's reasoning.
 
 Run:
     python services/triage-agent/server.py
-Endpoints:
-    http://127.0.0.1:9101/.well-known/agent-card.json   (Agent Card)
-    http://127.0.0.1:9101/                              (A2A JSON-RPC)
 """
 
 from __future__ import annotations
@@ -21,14 +20,12 @@ import os
 import pathlib
 import sys
 
-# services/<name>/server.py runs as a standalone script, so put services/ on the
-# path to import the shared base.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from soc_agent import (  # noqa: E402
     AgentSkill,
-    Delegation,
-    LlmToolLoopExecutor,
+    Workflow,
+    WorkflowExecutor,
     build_agent_card,
     build_app,
     listen_config,
@@ -37,42 +34,27 @@ from soc_agent import (  # noqa: E402
 
 HOST, PORT, PUBLIC_URL = listen_config(default_port=9101)
 
-# Tool zone endpoint, configured not hardcoded: agent -> tool calls cross a zone
-# boundary, so this address changes per tier and environment.
+# Tool zone endpoint, configured not hardcoded.
 SIEM_MCP_ENDPOINT = os.environ.get("SIEM_MCP_ENDPOINT", "http://127.0.0.1:7001/mcp")
-# Peer agent in the agent zone, reached over A2A. Discovery may later come from
-# the platform-zone service registry instead.
-ENRICHMENT_A2A_ENDPOINT = os.environ.get(
-    "ENRICHMENT_A2A_ENDPOINT", "http://127.0.0.1:9102"
-)
 
-DELEGATE_ENRICHMENT_ACTION = "delegate_to_enrichment"
+WORKFLOW = Workflow.load()
 
 SYSTEM_PROMPT = (
-    "You are a SOC triage agent. Given a security alert, assess it briefly and "
-    "state a severity and a recommended next action. You have access to SIEM "
-    "tools; use them when you need alert data rather than inventing it. You "
-    f"can also call {DELEGATE_ENRICHMENT_ACTION} to hand an indicator or asset "
-    "to the Enrichment agent when you need reputation or ownership context."
+    "You are a SOC triage agent. Assess the alert briefly and classify its "
+    "severity. You have SIEM tools; use them when you need alert data rather "
+    "than inventing it. Do not decide who handles the alert next — that is "
+    "routed for you. End your reply with a line exactly of the form "
+    "'SEVERITY: <benign|low|medium|high|critical>' reflecting your assessment."
 )
 
 
-def build_executor() -> LlmToolLoopExecutor:
-    return LlmToolLoopExecutor(
+def build_executor() -> WorkflowExecutor:
+    return WorkflowExecutor(
+        agent_name="triage",
+        workflow=WORKFLOW,
         agent_label="Triage",
         system_prompt=SYSTEM_PROMPT,
         mcp_endpoints=[SIEM_MCP_ENDPOINT],
-        delegations=[
-            Delegation(
-                action_name=DELEGATE_ENRICHMENT_ACTION,
-                description=(
-                    "Delegate to the Enrichment agent to get IOC reputation and "
-                    "asset ownership context for indicators found in an alert. "
-                    "Use for IPs, hosts, domains, or hashes."
-                ),
-                endpoint=ENRICHMENT_A2A_ENDPOINT,
-            )
-        ],
     )
 
 
@@ -80,17 +62,17 @@ def build_card():
     return build_agent_card(
         name="Triage",
         description=(
-            "Front-line SOC triage agent. Receives raw security alerts and "
-            "classifies them by severity and disposition for downstream "
-            "enrichment and correlation."
+            "Front-line SOC triage agent and entry point of the workflow. "
+            "Classifies an alert's severity; routing to enrichment or dismissal "
+            "is decided by the workflow definition."
         ),
         public_url=PUBLIC_URL,
         skill=AgentSkill(
             id="triage_alert",
             name="Alert Triage",
             description=(
-                "Classify an incoming security alert and assign an initial "
-                "severity and recommended next action."
+                "Classify an incoming security alert and assign a severity that "
+                "drives the workflow's escalate/dismiss branch."
             ),
             tags=["soc", "triage", "alerts"],
             examples=["Triage alert-0001: suspicious outbound data transfer"],

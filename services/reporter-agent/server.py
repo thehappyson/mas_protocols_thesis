@@ -26,7 +26,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from soc_agent import (  # noqa: E402
     AgentSkill,
-    LlmToolLoopExecutor,
+    Workflow,
+    WorkflowExecutor,
     build_agent_card,
     build_app,
     listen_config,
@@ -40,17 +41,24 @@ TICKETING_MCP_ENDPOINT = os.environ.get(
     "TICKETING_MCP_ENDPOINT", "http://127.0.0.1:7005/mcp"
 )
 
+WORKFLOW = Workflow.load()
+
 SYSTEM_PROMPT = (
-    "You are a SOC reporter agent. Given an incident and its triage, enrichment, "
-    "and correlation findings, write a concise incident summary and file it as a "
-    "ticket using your ticketing tool. Create the incident with a clear title, a "
-    "summary description, and a severity. Return the incident id and a short "
-    "confirmation of what you filed."
+    "You are a SOC reporter agent. You receive an alert and whatever findings "
+    "preceded you. File a ticket using your ticketing tool. If the alert was "
+    "dismissed as benign or low severity (no enrichment/correlation/response "
+    "findings are present), file a brief DISMISSAL report. Otherwise file a full "
+    "INCIDENT report summarizing the triage, enrichment, correlation, and "
+    "response/containment findings. Create the ticket with a clear title, a "
+    "summary description, and a severity, then return the incident id and a "
+    "short confirmation of what you filed."
 )
 
 
-def build_executor() -> LlmToolLoopExecutor:
-    return LlmToolLoopExecutor(
+def build_executor() -> WorkflowExecutor:
+    return WorkflowExecutor(
+        agent_name="reporter",
+        workflow=WORKFLOW,
         agent_label="Reporter",
         system_prompt=SYSTEM_PROMPT,
         mcp_endpoints=[TICKETING_MCP_ENDPOINT],

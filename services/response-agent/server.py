@@ -38,7 +38,8 @@ from typing import Any  # noqa: E402
 from soc_agent import (  # noqa: E402
     AgentSkill,
     Delegation,
-    LlmToolLoopExecutor,
+    Workflow,
+    WorkflowExecutor,
     build_agent_card,
     build_app,
     listen_config,
@@ -51,10 +52,12 @@ HOST, PORT, PUBLIC_URL = listen_config(default_port=9104)
 CONTAINMENT_MCP_ENDPOINT = os.environ.get(
     "CONTAINMENT_MCP_ENDPOINT", "http://127.0.0.1:7006/mcp"
 )
-# Peer agent consulted before containment, reached over A2A.
-VERIFICATION_A2A_ENDPOINT = os.environ.get(
-    "VERIFICATION_A2A_ENDPOINT", "http://127.0.0.1:9106"
-)
+
+WORKFLOW = Workflow.load()
+# The verification peer is NOT hard-coded: its identity comes from the workflow
+# (response.consult) and its endpoint resolves from config there.
+VERIFICATION_AGENT = WORKFLOW.consult("response")
+VERIFICATION_A2A_ENDPOINT = WORKFLOW.endpoint(VERIFICATION_AGENT)
 
 DELEGATE_VERIFICATION_ACTION = "delegate_to_verification"
 
@@ -80,9 +83,11 @@ SYSTEM_PROMPT = (
 CONTAINMENT_TOOL = "contain"
 
 
-class VerifiedContainmentExecutor(LlmToolLoopExecutor):
-    """Response's executor: the LLM branches on the verdict as its primary logic,
-    and a structural guard makes the privileged step correct-by-construction.
+class VerifiedContainmentExecutor(WorkflowExecutor):
+    """Response's executor: a WorkflowExecutor (so it sits in the graph like the
+    others — forward-terminal here) whose LLM loop performs the bidirectional
+    Verification consult, plus a structural guard that makes the privileged step
+    correct-by-construction.
 
     The demo showed prompt-only branching is not enough for a privileged action:
     the model occasionally fabricates the target or could contain despite a
@@ -119,8 +124,10 @@ class VerifiedContainmentExecutor(LlmToolLoopExecutor):
         return None
 
 
-def build_executor() -> LlmToolLoopExecutor:
+def build_executor() -> WorkflowExecutor:
     return VerifiedContainmentExecutor(
+        agent_name="response",
+        workflow=WORKFLOW,
         agent_label="Response",
         system_prompt=SYSTEM_PROMPT,
         mcp_endpoints=[CONTAINMENT_MCP_ENDPOINT],
