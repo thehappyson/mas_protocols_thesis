@@ -7,7 +7,13 @@ DESIGN PRINCIPLE: the protocol machinery is real, the domain logic is stubbed.
 The MCP interface below — tool registration, JSON schema, streamable HTTP
 transport — is the genuine article, because the protocol layer is what this
 thesis measures. Everything behind `next_alerts` is a canned response: there is
-no SIEM, no query engine, no alert store. See _CANNED_ALERT.
+no SIEM, no query engine, no alert store.
+
+DATA-ACCESS SEAM: the MCP tool method calls a separate data-access function
+(`_fetch_alerts`) that is the single, clearly-marked place where a real DB
+query will later go. The MCP method, schema, and validation are final; only the
+innards of `_fetch_alerts` are provisional. Wiring real Postgres later means
+editing that one function, nothing else. This is a READ tool.
 
 Written against MCP Python SDK 2.0.0, where the ergonomic server class is
 `MCPServer` (the 1.x `FastMCP`) and transport is selected via
@@ -37,10 +43,8 @@ server = MCPServer(
     instructions="Synthetic SOC SIEM. Provides access to security alerts for triage.",
 )
 
-# STUB: the entire domain layer. A real SIEM tool would query an alert store
-# filtered by `since`; this returns one fixed, plausible alert so that agents
-# have something structurally realistic to reason over. Fields mirror a
-# normalized SIEM alert record.
+# One fixed, plausible alert so agents have something structurally realistic to
+# reason over. Fields mirror a normalized SIEM alert record.
 _CANNED_ALERT: dict[str, Any] = {
     "id": "alert-0001",
     "timestamp": "2026-08-02T14:23:17Z",
@@ -55,6 +59,21 @@ _CANNED_ALERT: dict[str, Any] = {
 }
 
 
+def _fetch_alerts(since: str | None, limit: int) -> list[dict[str, Any]]:
+    """DATA-ACCESS SEAM (read). The single place a real DB query will go.
+
+    # TODO: replace canned return with real DB query
+    #   e.g. SELECT ... FROM alerts WHERE ts > :since ORDER BY ts DESC LIMIT :limit
+    #   against the operational Postgres in the data zone.
+
+    STUB: `since` is ignored entirely and the canned alert is returned
+    regardless of its timestamp. `limit` truncates the single-element canned
+    list, so any limit >= 1 yields the same one alert.
+    """
+    alerts = [_CANNED_ALERT]
+    return alerts[:limit] if limit >= 0 else alerts
+
+
 @server.tool(
     description=(
         "Fetch recent security alerts from the SIEM, newest first. "
@@ -66,15 +85,9 @@ def next_alerts(since: str | None = None, limit: int = 10) -> list[dict[str, Any
 
     Args:
         since: ISO-8601 timestamp; only alerts after this point are returned.
-            Currently accepted but not honored (stub).
         limit: Maximum number of alerts to return.
-
-    STUB: `since` is ignored entirely and the canned alert is returned
-    regardless of its timestamp. `limit` is honored only as a truncation of the
-    single-element canned list, so any limit >= 1 yields the same one alert.
     """
-    alerts = [_CANNED_ALERT]
-    return alerts[:limit] if limit >= 0 else alerts
+    return _fetch_alerts(since, limit)
 
 
 if __name__ == "__main__":
