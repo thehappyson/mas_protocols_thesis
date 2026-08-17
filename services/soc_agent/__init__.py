@@ -89,15 +89,19 @@ INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "qwen3.6:35b-mlx")
 # Dummy by design: Ollama ignores it, but the OpenAI client requires a value.
 # TODO: read from a Secret when the endpoint is one that actually authenticates.
 INFERENCE_API_KEY = os.environ.get("INFERENCE_API_KEY", "not-used-by-ollama")
-# A 35B model answering cold can take tens of seconds; keep well clear of that.
-INFERENCE_TIMEOUT = float(os.environ.get("INFERENCE_TIMEOUT", "300"))
+# Per-call client timeout. Default is high (900s) on purpose: the deepest chain
+# calls receive the largest accumulated prompt AND generate natural (uncapped)
+# length output on a slow local reasoning model, so a low timeout would cut off
+# legitimate responses and corrupt latency measurements. Config-driven; lower it
+# only if the backend is fast (e.g. vLLM on GPU).
+INFERENCE_TIMEOUT = float(os.environ.get("INFERENCE_TIMEOUT", "900"))
 # Guards against a model that keeps requesting tools forever. Counts LLM calls,
 # so the loop makes at most this many round trips before giving up.
 MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
-# Optional cap on tokens per generation. OFF by default so the reproducibility
-# contract (temperature 0, otherwise server defaults) is unchanged. Set it only
-# to bound a verbose reasoning model's runaway generations in dev — large enough
-# not to truncate normal answers. None => unlimited (default).
+# Optional cap on tokens per generation. OFF by default (None => unlimited) so
+# reportable runs are not truncated — a cap biases both output content and
+# latency measurements. Set it only as a dev convenience to bound a verbose
+# reasoning model; never for reportable runs.
 _max_tok = os.environ.get("INFERENCE_MAX_TOKENS")
 INFERENCE_MAX_TOKENS = int(_max_tok) if _max_tok else None
 
@@ -254,24 +258,38 @@ class LlmToolLoopExecutor(AgentExecutor):
         """
         return None
 
-    async def _delegate(self, endpoint: str, request_text: str) -> str:
+    async def _delegate(
+        self, endpoint: str, request_text: str, updater: TaskUpdater | None = None
+    ) -> str:
         """Send a sub-task to a peer agent over A2A and return its answer.
+
+        PROTOCOL-VISIBLE LINEAGE: the delegated message carries
+        `reference_task_ids = [parent_task_id]` and the parent's `context_id`.
+        The peer creates its sub-task from this message, so the sub-task's
+        history records its parent by task id and the whole chain shares one
+        context. The delegation depth (RQ2) is then reconstructable from A2A
+        task references alone (list_tasks by context_id -> follow
+        reference_task_ids), with no custom logs. Parent identity comes from the
+        TaskUpdater, which carries this agent's own task_id / context_id.
 
         The peer's card is resolved per delegation: correct and stateless, but
         it costs an extra HTTP round trip each time — worth caching once
         discovery moves to the service registry.
         """
+        message = Message(
+            message_id=str(uuid.uuid4()),
+            role=Role.ROLE_USER,
+            parts=[Part(text=request_text)],
+        )
+        if updater is not None:
+            message.reference_task_ids.append(updater.task_id)
+            message.context_id = updater.context_id
+
         async with httpx.AsyncClient(timeout=INFERENCE_TIMEOUT) as http:
             peer = await create_client(
                 endpoint, ClientConfig(httpx_client=http, streaming=True)
             )
-            request = SendMessageRequest(
-                message=Message(
-                    message_id=str(uuid.uuid4()),
-                    role=Role.ROLE_USER,
-                    parts=[Part(text=request_text)],
-                )
-            )
+            request = SendMessageRequest(message=message)
             answer = ""
             async for response in peer.send_message(request):
                 payload = response.WhichOneof("payload")
@@ -376,7 +394,7 @@ class LlmToolLoopExecutor(AgentExecutor):
                     if name in self._delegations:
                         request = arguments.get("request", "")
                         content = await self._delegate(
-                            self._delegations[name].endpoint, request
+                            self._delegations[name].endpoint, request, updater
                         )
                         # Let a subclass record the verdict for later gating.
                         content = self._on_delegation_result(
@@ -615,7 +633,7 @@ class WorkflowExecutor(LlmToolLoopExecutor):
                 ),
             )
             self._log(f"delegating to {succ} (depth {succ_depth}); awaiting")
-            result = await self._delegate(url, feed)
+            result = await self._delegate(url, feed, updater)
             self._log(f"{succ} returned; unwinding")
             feed = result  # the next successor (if any) sees the prior's result
         return result
