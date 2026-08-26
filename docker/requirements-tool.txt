@@ -1,0 +1,7 @@
+# MCP tool image deps — the tools only need the MCP SDK (streamable-HTTP server)
+# and uvicorn (its ASGI runner). No a2a/openai/otel here; tools are stubs behind
+# their data-access seams.
+mcp==2.0.0
+uvicorn==0.52.1
+# Postgres driver for the wired data-access seams (operational + audit DBs).
+psycopg2-binary==2.9.10

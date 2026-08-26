@@ -24,14 +24,22 @@ Endpoint:
 from __future__ import annotations
 
 import os
+import pathlib
+import sys
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from mcp_db import rows  # noqa: E402  (shared DB helper, tool image)
 
 # Matches the container env convention in deployment/base/tools/cmdb.yaml.
 HOST = os.environ.get("MCP_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_LISTEN_PORT", "7002"))
 PATH = os.environ.get("MCP_PATH", "/mcp")
+OPERATIONAL_DB_URL = os.environ.get(
+    "OPERATIONAL_DB_URL", "postgresql://soc:soc@127.0.0.1:5432/soc_operational"
+)
 
 server = MCPServer(
     name="cmdb",
@@ -55,19 +63,9 @@ _CANNED_ASSET: dict[str, Any] = {
     "last_seen": "2026-08-02T14:20:00Z",
 }
 
-# A few explicitly-known assets so criticality is KEYED on the asset (a lookup,
-# not a constant) — mirrors the threat-intel tool's keyed verdicts. This makes
-# the field meaningful for consumers like the Verification agent, which judges a
-# proposed containment action against the target's criticality: isolating a
-# workstation is routine, isolating a domain controller is not.
-_KNOWN_ASSETS: dict[str, dict[str, Any]] = {
-    "10.14.7.32": {"hostname": "fin-ws-0447", "owner": "finance-workstations",
-                   "criticality": "medium"},
-    "dc-01": {"hostname": "dc-01", "owner": "core-identity",
-              "criticality": "critical", "os": "Windows Server 2022"},
-    "10.0.0.10": {"hostname": "dc-01", "owner": "core-identity",
-                  "criticality": "critical", "os": "Windows Server 2022"},
-}
+# Known assets now live in the operational `assets` table (criticality keyed on
+# the asset id, e.g. workstation=medium vs domain-controller=critical). _CANNED_
+# records above/below remain only as the "not found" placeholders.
 _CANNED_USER: dict[str, Any] = {
     "user_id": "jdoe",
     "display_name": "Jordan Doe",
@@ -80,38 +78,44 @@ _CANNED_USER: dict[str, Any] = {
 
 
 def _fetch_asset(asset_id: str) -> dict[str, Any]:
-    """DATA-ACCESS SEAM (read). The single place a real DB query will go.
+    """DATA-ACCESS SEAM (read) — backed by the operational `assets` table.
 
-    # TODO: replace canned return with real DB query
-    #   e.g. SELECT ... FROM assets WHERE asset_id = :asset_id
-    #   against the operational Postgres in the data zone.
-
-    STUB: known assets come from a small table (criticality keyed on the id);
-    an unknown id reports criticality "unknown" rather than a default, so
-    consumers (e.g. the Verification agent) can treat an unresolved target
-    cautiously instead of assuming it is low-risk.
+    Found -> the real record; not found -> the same "unknown" placeholder as the
+    stub (criticality "unknown"), so consumers (e.g. Verification) still treat an
+    unresolved target cautiously. Return shape unchanged.
     """
-    known = _KNOWN_ASSETS.get(asset_id)
-    if known is None:
-        return {
-            **_CANNED_ASSET,
-            "asset_id": asset_id,
-            "hostname": "unknown",
-            "owner": "unknown",
-            "criticality": "unknown",
-        }
-    return {**_CANNED_ASSET, **known, "asset_id": asset_id}
+    found = rows(
+        OPERATIONAL_DB_URL,
+        "SELECT asset_id, hostname, owner, owner_contact, criticality, location, os, "
+        "to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS last_seen "
+        "FROM assets WHERE asset_id = %s",
+        (asset_id,),
+    )
+    if found:
+        return found[0]
+    return {
+        **_CANNED_ASSET,
+        "asset_id": asset_id,
+        "hostname": "unknown",
+        "owner": "unknown",
+        "criticality": "unknown",
+    }
 
 
 def _fetch_user(user_id: str) -> dict[str, Any]:
-    """DATA-ACCESS SEAM (read). The single place a real DB query will go.
+    """DATA-ACCESS SEAM (read) — backed by the operational `users` table.
 
-    # TODO: replace canned return with real DB query
-    #   e.g. SELECT ... FROM users WHERE user_id = :user_id
-    #   against the operational Postgres in the data zone.
-
-    STUB: the lookup is echoed into the canned record; other fields are fixed.
+    Found -> the real record; not found -> the canned placeholder with the id
+    echoed in (unchanged fallback). Return shape unchanged.
     """
+    found = rows(
+        OPERATIONAL_DB_URL,
+        "SELECT user_id, display_name, department, manager, email, privileged, "
+        "mfa_enrolled FROM users WHERE user_id = %s",
+        (user_id,),
+    )
+    if found:
+        return found[0]
     return {**_CANNED_USER, "user_id": user_id}
 
 

@@ -1,0 +1,340 @@
+# =============================================================================
+# SOC multi-agent testbed — local-dev docker-compose.
+#
+# One container per component: 6 agents + 6 MCP tools + Phoenix. The shared agent
+# base (services/soc_agent) is baked into the agent image (docker/Dockerfile.agent),
+# NOT a separate container. All inter-component traffic is real container
+# networking on the `soc` bridge, addressed by service name:
+#   * A2A         agent  -> agent   (http://<agent>:910x/)
+#   * MCP (HTTP)  agent  -> tool    (http://mcp-<tool>:700x/mcp)
+#   * OTLP        agent  -> phoenix (http://phoenix:6006/v1/traces)
+#   * Inference   agent  -> HOST    (http://host.docker.internal:11434/v1)
+#
+# Every endpoint is config/env — no hardcoded localhost survives into the network.
+# Inference stays on the host (native Ollama, dev instruct model); production
+# swaps INFERENCE_ENDPOINT/MODEL for vLLM without any code or image change.
+#
+# NO data layer here (tools still serve canned data via their seams). Adding
+# Postgres/pgvector later is a new service on the `soc` network + a
+# *_DB_ENDPOINT env on the tools — see the note at the bottom.
+#
+#   docker compose up --build
+# =============================================================================
+
+networks:
+  soc:
+    driver: bridge
+
+volumes:
+  pgdata-operational:
+  pgdata-audit:
+
+# ---- database DSNs (from config; container-network addressed) ----------------
+# Operational tools hold only the operational DSN; the containment tool holds
+# only the audit DSN — the operational/audit separation is enforced by which
+# credential a tool has.
+x-db-urls:
+  operational: &op-db-url "postgresql://soc:soc@postgres-operational:5432/soc_operational"
+  audit: &audit-db-url "postgresql://audit_admin:audit@postgres-audit:5433/soc_audit"
+
+# ---- shared agent config (merged into every agent service) ------------------
+x-agent-env: &agent-env
+  # Inference: native Ollama on the host, reached from containers via the gateway.
+  INFERENCE_ENDPOINT: "http://host.docker.internal:11434/v1"
+  INFERENCE_MODEL: "llama3.1:8b"
+  # Bind on all interfaces so peers on the bridge can reach the A2A server.
+  A2A_LISTEN_HOST: "0.0.0.0"
+  # Tracing to the Phoenix container.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://phoenix:6006/v1/traces"
+  PHOENIX_PROJECT_NAME: "soc-testbed"
+  # Peer A2A endpoints (workflow resolves successors via these, env over file).
+  TRIAGE_A2A_ENDPOINT: "http://triage-agent:9101"
+  ENRICHMENT_A2A_ENDPOINT: "http://enrichment-agent:9102"
+  CORRELATION_A2A_ENDPOINT: "http://correlation-agent:9103"
+  RESPONSE_A2A_ENDPOINT: "http://response-agent:9104"
+  REPORTER_A2A_ENDPOINT: "http://reporter-agent:9105"
+  VERIFICATION_A2A_ENDPOINT: "http://verification-agent:9106"
+  # MCP tool endpoints (agents open these per task).
+  SIEM_MCP_ENDPOINT: "http://mcp-siem:7001/mcp"
+  CMDB_MCP_ENDPOINT: "http://mcp-cmdb:7002/mcp"
+  THREAT_INTEL_MCP_ENDPOINT: "http://mcp-threat-intel:7003/mcp"
+  RUNBOOK_MCP_ENDPOINT: "http://mcp-runbook:7004/mcp"
+  TICKETING_MCP_ENDPOINT: "http://mcp-ticketing:7005/mcp"
+  CONTAINMENT_MCP_ENDPOINT: "http://mcp-containment:7006/mcp"
+
+x-agent-common: &agent-common
+  # All six agents REFERENCE this tag; exactly one service (triage-agent) carries
+  # the `build:` for it, so the image builds once and there is no build race.
+  image: soc-agent:dev
+  # Use the locally-built tag; never try to pull it from a registry (it isn't on
+  # one). The sole builder produces it in the build phase before any container
+  # starts, so the referencing services find it locally — no pull-denied noise.
+  pull_policy: never
+  networks: [soc]
+  restart: unless-stopped
+  # Reach the host's native Ollama at host.docker.internal (portable on Linux too).
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    phoenix:
+      condition: service_healthy
+
+x-tool-common: &tool-common
+  # All six tools REFERENCE this tag; exactly one service (mcp-siem) carries the
+  # `build:` for it, so the image builds once and there is no build race.
+  image: soc-tool:dev
+  # Use the locally-built tag; never try to pull it (see agent note above).
+  pull_policy: never
+  networks: [soc]
+  restart: unless-stopped
+  environment:
+    MCP_LISTEN_HOST: "0.0.0.0"
+
+services:
+  # ---- Observability ---------------------------------------------------------
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    networks: [soc]
+    restart: unless-stopped
+    environment:
+      PHOENIX_PORT: "6006"
+      PHOENIX_GRPC_PORT: "4317"
+      PHOENIX_ENABLE_AUTH: "false"
+      PHOENIX_TELEMETRY_ENABLED: "false"
+    ports:
+      - "6006:6006"   # UI + OTLP/HTTP
+      - "4317:4317"   # OTLP/gRPC
+    labels:
+      com.soc-testbed.component: "platform"
+      com.soc-testbed.role: "phoenix"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:6006',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---- Data zone: operational + audit Postgres (separate instances) ----------
+  postgres-operational:
+    image: postgres:16
+    networks: [soc]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: soc_operational
+      POSTGRES_USER: soc
+      POSTGRES_PASSWORD: soc
+    volumes:
+      # Schema + reproducible seed; runs once on first init (drop the named
+      # volume to re-seed). Named volume persists data across restarts.
+      - ./docker/initdb/operational:/docker-entrypoint-initdb.d:ro
+      - pgdata-operational:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    labels: {com.soc-testbed.component: "data", com.soc-testbed.role: "operational-db"}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soc -d soc_operational"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  postgres-audit:
+    image: postgres:16
+    networks: [soc]
+    restart: unless-stopped
+    command: ["-p", "5433"]              # separate instance on 5433, per convention
+    environment:
+      POSTGRES_DB: soc_audit
+      POSTGRES_USER: audit_admin
+      POSTGRES_PASSWORD: audit
+      PGPORT: "5433"
+    volumes:
+      - ./docker/initdb/audit:/docker-entrypoint-initdb.d:ro
+      - pgdata-audit:/var/lib/postgresql/data
+    ports: ["5433:5433"]
+    labels: {com.soc-testbed.component: "data", com.soc-testbed.role: "audit-db"}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit_admin -d soc_audit -p 5433"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # ---- Analysis instrument: Memgraph — STANDING, NOT wired into any tool or the
+  # request path. No agent or tool references it; it is here for later offline
+  # trust-graph analysis (populated later from delegation logs), not runtime.
+  memgraph:
+    image: memgraph/memgraph:latest
+    networks: [soc]
+    restart: unless-stopped
+    command: ["--bolt-port=7687", "--log-level=WARNING", "--telemetry-enabled=false"]
+    ports: ["7687:7687"]
+    labels: {com.soc-testbed.component: "instrument", com.soc-testbed.role: "memgraph"}
+
+  # ---- Tool zone: 6 MCP tool servers (streamable HTTP) -----------------------
+  mcp-siem:
+    <<: *tool-common
+    # Sole builder of soc-tool:dev (the other five tools reference the tag).
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.tool
+    command: ["python", "services/mcp-siem/server.py"]
+    environment: {MCP_LISTEN_HOST: "0.0.0.0", MCP_LISTEN_PORT: "7001", OPERATIONAL_DB_URL: *op-db-url}
+    depends_on: {postgres-operational: {condition: service_healthy}}
+    ports: ["7001:7001"]
+    labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "siem"}
+    healthcheck: &tool-health
+      test: ["CMD", "python", "-c", "import socket,os; socket.create_connection(('localhost', int(os.environ['MCP_LISTEN_PORT'])), 3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  mcp-cmdb:
+    <<: *tool-common
+    command: ["python", "services/mcp-cmdb/server.py"]
+    environment: {MCP_LISTEN_HOST: "0.0.0.0", MCP_LISTEN_PORT: "7002", OPERATIONAL_DB_URL: *op-db-url}
+    depends_on: {postgres-operational: {condition: service_healthy}}
+    ports: ["7002:7002"]
+    labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "cmdb"}
+    healthcheck: *tool-health
+
+  mcp-threat-intel:
+    <<: *tool-common
+    command: ["python", "services/mcp-threat-intel/server.py"]
+    environment: {MCP_LISTEN_HOST: "0.0.0.0", MCP_LISTEN_PORT: "7003", OPERATIONAL_DB_URL: *op-db-url}
+    depends_on: {postgres-operational: {condition: service_healthy}}
+    ports: ["7003:7003"]
+    labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "threat-intel"}
+    healthcheck: *tool-health
+
+  mcp-runbook:
+    <<: *tool-common
+    command: ["python", "services/mcp-runbook/server.py"]
+    environment: {MCP_LISTEN_HOST: "0.0.0.0", MCP_LISTEN_PORT: "7004", OPERATIONAL_DB_URL: *op-db-url}
+    depends_on: {postgres-operational: {condition: service_healthy}}
+    ports: ["7004:7004"]
+    labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "runbook"}
+    healthcheck: *tool-health
+
+  mcp-ticketing:
+    <<: *tool-common
+    command: ["python", "services/mcp-ticketing/server.py"]
+    environment: {MCP_LISTEN_HOST: "0.0.0.0", MCP_LISTEN_PORT: "7005", OPERATIONAL_DB_URL: *op-db-url}
+    depends_on: {postgres-operational: {condition: service_healthy}}
+    ports: ["7005:7005"]
+    labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "ticketing"}
+    healthcheck: *tool-health
+
+  mcp-containment:
+    <<: *tool-common
+    command: ["python", "services/mcp-containment/server.py"]
+    # Audit DSN only — containment must never reach operational data.
+    environment: {MCP_LISTEN_HOST: "0.0.0.0", MCP_LISTEN_PORT: "7006", AUDIT_DB_URL: *audit-db-url}
+    depends_on: {postgres-audit: {condition: service_healthy}}
+    ports: ["7006:7006"]
+    labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "containment"}
+    healthcheck: *tool-health
+
+  # ---- Agent zone: 6 agents (A2A servers) ------------------------------------
+  triage-agent:
+    <<: *agent-common
+    # Sole builder of soc-agent:dev (the other five agents reference the tag).
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    command: ["python", "services/triage-agent/server.py"]
+    environment:
+      <<: *agent-env
+      A2A_PUBLIC_URL: "http://triage-agent:9101/"
+    ports: ["9101:9101"]
+    labels: {com.soc-testbed.component: "agent", com.soc-testbed.role: "triage"}
+    healthcheck: &agent-health
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9101/.well-known/agent-card.json',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  enrichment-agent:
+    <<: *agent-common
+    command: ["python", "services/enrichment-agent/server.py"]
+    environment:
+      <<: *agent-env
+      A2A_PUBLIC_URL: "http://enrichment-agent:9102/"
+    ports: ["9102:9102"]
+    labels: {com.soc-testbed.component: "agent", com.soc-testbed.role: "enrichment"}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9102/.well-known/agent-card.json',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  correlation-agent:
+    <<: *agent-common
+    command: ["python", "services/correlation-agent/server.py"]
+    environment:
+      <<: *agent-env
+      A2A_PUBLIC_URL: "http://correlation-agent:9103/"
+    ports: ["9103:9103"]
+    labels: {com.soc-testbed.component: "agent", com.soc-testbed.role: "correlation"}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9103/.well-known/agent-card.json',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  response-agent:
+    <<: *agent-common
+    command: ["python", "services/response-agent/server.py"]
+    environment:
+      <<: *agent-env
+      A2A_PUBLIC_URL: "http://response-agent:9104/"
+    ports: ["9104:9104"]
+    labels: {com.soc-testbed.component: "agent", com.soc-testbed.role: "response"}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9104/.well-known/agent-card.json',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  reporter-agent:
+    <<: *agent-common
+    command: ["python", "services/reporter-agent/server.py"]
+    environment:
+      <<: *agent-env
+      A2A_PUBLIC_URL: "http://reporter-agent:9105/"
+    ports: ["9105:9105"]
+    labels: {com.soc-testbed.component: "agent", com.soc-testbed.role: "reporter"}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9105/.well-known/agent-card.json',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  verification-agent:
+    <<: *agent-common
+    command: ["python", "services/verification-agent/server.py"]
+    environment:
+      <<: *agent-env
+      A2A_PUBLIC_URL: "http://verification-agent:9106/"
+    ports: ["9106:9106"]
+    labels: {com.soc-testbed.component: "agent", com.soc-testbed.role: "verification"}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9106/.well-known/agent-card.json',timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+# =============================================================================
+# DATA LAYER — intentionally absent (tools serve canned data via their seams).
+# When added, it drops in cleanly as new services on the `soc` network, e.g.:
+#   postgres-operational:  { image: pgvector/pgvector:pg16, networks: [soc], ... }
+#   postgres-audit:        { image: postgres:16,            networks: [soc], ... }
+# then point each tool's data-access seam at it via a *_DB_ENDPOINT env. No agent
+# or networking change needed — same bridge, same service-name addressing.
+# =============================================================================

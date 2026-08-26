@@ -26,14 +26,23 @@ Endpoint:
 from __future__ import annotations
 
 import os
+import pathlib
+import re
+import sys
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from mcp_db import rows  # noqa: E402  (shared DB helper, tool image)
 
 # Matches the container env convention in deployment/base/tools/runbook.yaml.
 HOST = os.environ.get("MCP_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_LISTEN_PORT", "7004"))
 PATH = os.environ.get("MCP_PATH", "/mcp")
+OPERATIONAL_DB_URL = os.environ.get(
+    "OPERATIONAL_DB_URL", "postgresql://soc:soc@127.0.0.1:5432/soc_operational"
+)
 
 server = MCPServer(
     name="runbook",
@@ -44,35 +53,32 @@ server = MCPServer(
     ),
 )
 
-# One fixed, plausible runbook snippet so agents have a structurally realistic
-# procedure to reason over. Fields mirror a normalized runbook entry.
-_CANNED_RUNBOOK: dict[str, Any] = {
-    "title": "Suspected Data Exfiltration — Initial Response",
-    "steps": [
-        "Confirm the outbound transfer volume and destination against baseline.",
-        "Isolate the source host from the network to arrest ongoing transfer.",
-        "Preserve volatile evidence (netflow, process list, open handles).",
-        "Enrich the destination indicator and check for related alerts.",
-        "Open an incident ticket and escalate to IR if exfiltration is confirmed.",
-    ],
-    "attack_ref": "TA0010 (Exfiltration)",
-    "source": "synthetic-runbook (stub)",
-}
-
-
 def _search_runbook(query: str, limit: int) -> list[dict[str, Any]]:
-    """DATA-ACCESS SEAM (read). The single place a real query will go.
+    """DATA-ACCESS SEAM (read) — keyword search over the `runbook` table.
 
-    # TODO: replace canned return with real DB query
-    #   e.g. RAG/keyword search over a seeded runbook corpus in the data zone
-    #   (pgvector similarity or full-text search), ranked by relevance to query.
-
-    STUB: `query` is echoed back for traceability but does not steer retrieval;
-    the same canned snippet is returned regardless. `limit` truncates the
-    single-element result list.
+    Retrieval is now real: the query terms are matched (ILIKE) against each
+    entry's keywords and title; matches are returned newest-first, bounded by
+    `limit`, each with `matched_query` echoed in. Chose KEYWORD search (not
+    pgvector embeddings) — sufficient for the seeded corpus and dependency-free.
+    Return shape unchanged ({title, steps, attack_ref, source, matched_query}).
+    Note: with no matching term the result is an empty list (the stub always
+    returned one canned entry); no workflow agent uses this tool, so this does
+    not affect the escalate/benign paths.
     """
-    results = [{**_CANNED_RUNBOOK, "matched_query": query}]
-    return results[:limit] if limit >= 0 else results
+    terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 2]
+    patterns = [f"%{t}%" for t in terms]
+    if not patterns:
+        return []
+    sql = (
+        "SELECT title, steps, attack_ref, source FROM runbook "
+        "WHERE keywords ILIKE ANY(%s) OR title ILIKE ANY(%s) ORDER BY id"
+    )
+    params: list[Any] = [patterns, patterns]
+    if limit is not None and limit >= 0:
+        sql += " LIMIT %s"
+        params.append(limit)
+    found = rows(OPERATIONAL_DB_URL, sql, tuple(params))
+    return [{**r, "matched_query": query} for r in found]
 
 
 @server.tool(

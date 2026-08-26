@@ -1,0 +1,22 @@
+# Agent image — one image for all six agents. The SHARED BASE (services/soc_agent)
+# is baked into this image, not a separate container: every agent process imports
+# it in-process. The six agents run as separate CONTAINERS off this one image,
+# each started with a different `command` in compose (services/<name>/server.py),
+# so runtime separation is preserved while the base is built in once.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Deps first for layer caching.
+COPY docker/requirements-agent.txt /tmp/requirements-agent.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-agent.txt
+
+# App code: the agents, the shared soc_agent base, and the declarative workflow.
+# Import layout matches dev: services/<name>/server.py adds services/ to sys.path
+# and `import soc_agent`; Workflow.load() reads <repo>/workflows/*.yaml, i.e.
+# /app/workflows here.
+COPY services/ /app/services/
+COPY workflows/ /app/workflows/
+
+# The concrete agent is chosen per-service via `command:` in compose, e.g.
+#   command: ["python", "services/triage-agent/server.py"]

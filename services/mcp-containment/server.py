@@ -32,16 +32,26 @@ Endpoint:
 from __future__ import annotations
 
 import os
+import pathlib
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from mcp_db import execute  # noqa: E402  (shared DB helper, tool image)
+
 # Matches the container env convention in deployment/base/tools/containment.yaml.
 HOST = os.environ.get("MCP_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_LISTEN_PORT", "7006"))
 PATH = os.environ.get("MCP_PATH", "/mcp")
+# The SEPARATE, append-only audit store — NOT operational. Containment holds
+# only this DSN, so it structurally cannot touch operational data.
+AUDIT_DB_URL = os.environ.get(
+    "AUDIT_DB_URL", "postgresql://audit_admin:audit@127.0.0.1:5433/soc_audit"
+)
 
 server = MCPServer(
     name="containment",
@@ -65,17 +75,26 @@ def _write_audit_record(target: str, action: str) -> dict[str, Any]:
     #   (write-only role for tools). NOT the operational store.
     #   NOTHING IS PERSISTED YET — the audit id is minted in-process.
 
-    STUB: mints an audit id and returns a receipt. No audit record is stored and
-    — by design — no containment is performed on any real system.
+    Now a real INSERT into the SEPARATE append-only audit Postgres (never the
+    operational store). Still no real containment — the audit record is the
+    point. Receipt shape unchanged, `persisted` now True.
     """
     audit_id = f"AUD-{uuid.uuid4().hex[:8].upper()}"
+    recorded_at = datetime.now(timezone.utc).isoformat()
+    note = "audit record only — no real containment performed"
+    execute(
+        AUDIT_DB_URL,
+        "INSERT INTO audit_log (audit_id, tool, target, action, actor, "
+        "recorded_at, note) VALUES (%s,'containment',%s,%s,%s,%s,%s)",
+        (audit_id, target, action, "response-agent", recorded_at, note),
+    )
     return {
         "audit_id": audit_id,
         "target": target,
         "action": action,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "persisted": False,  # honest: no audit store behind this yet
-        "note": "audit record only — no real containment performed",
+        "recorded_at": recorded_at,
+        "persisted": True,
+        "note": note,
     }
 
 

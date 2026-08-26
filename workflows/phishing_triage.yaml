@@ -30,6 +30,8 @@ branch:
   signal: severity                     # marker Triage emits: "SEVERITY: <x>"
   severity_order: [benign, low, medium, high, critical]
   escalate_at: medium                  # >= medium -> escalate, else -> benign
+  # A missing or off-spec severity is NOT guessed: it routes to 'needs_review',
+  # an inert, logged terminal (no pipeline, no dismissal). See the triage routes.
 
 # Logical agent -> endpoint (env overrides the default) + forward routing.
 # `routes` maps a branch key to an ORDERED list of successors, each delegated to
@@ -42,6 +44,8 @@ agents:
     routes:
       benign:   [reporter]             # short-circuit
       escalate: [enrichment, reporter] # chain first, then route to reporter
+      needs_review: []                 # inert logged terminal (base handles it;
+                                       # no successors -> no pipeline, no action)
 
   enrichment:
     endpoint: http://127.0.0.1:9102

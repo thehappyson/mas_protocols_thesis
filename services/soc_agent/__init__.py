@@ -38,9 +38,18 @@ from typing import Any, Iterable
 import httpx
 import uvicorn
 import yaml
+from google.protobuf.json_format import MessageToDict
+from opentelemetry import trace as otel_trace
+from opentelemetry.propagate import extract as otel_extract, inject as otel_inject
 from mcp import Client as MCPClient
 from openai import AsyncOpenAI
 from starlette.applications import Starlette
+
+# Silence the a2a-sdk's own internal OTel instrumentation (event-queue/handler
+# spans) BEFORE a2a is imported — it reads this at import time. We keep exactly
+# one clean tracing path: our per-agent task/delegation spans plus the
+# OpenInference LLM spans. Overridable if the raw SDK spans are ever wanted.
+os.environ.setdefault("OTEL_INSTRUMENTATION_A2A_SDK_ENABLED", "false")
 
 from a2a.client import ClientConfig, create_client
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -77,6 +86,7 @@ __all__ = [
     "WorkflowExecutor",
     "build_agent_card",
     "build_app",
+    "init_tracing",
     "listen_config",
     "serve",
 ]
@@ -85,7 +95,7 @@ __all__ = [
 # Shared inference + loop config. Read once at import; identical across agents.
 # ---------------------------------------------------------------------------
 INFERENCE_ENDPOINT = os.environ.get("INFERENCE_ENDPOINT", "http://127.0.0.1:11434/v1")
-INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "qwen3.6:35b-mlx")
+INFERENCE_MODEL = os.environ.get("INFERENCE_MODEL", "llama3.1:8b") #use qwen3.8:27b-mlx downstream - llama 3.1 instruct for faster testing
 # Dummy by design: Ollama ignores it, but the OpenAI client requires a value.
 # TODO: read from a Secret when the endpoint is one that actually authenticates.
 INFERENCE_API_KEY = os.environ.get("INFERENCE_API_KEY", "not-used-by-ollama")
@@ -104,6 +114,72 @@ MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
 # reasoning model; never for reportable runs.
 _max_tok = os.environ.get("INFERENCE_MAX_TOKENS")
 INFERENCE_MAX_TOKENS = int(_max_tok) if _max_tok else None
+# Toggle the reasoning model on or off to use as instruct model
+# Reasoning behaviour can lead to uncapped runs and unwanted behaviour,
+# which is better controlled by instruct models
+INFERENCE_THINK = {"think": False}
+
+# --- Observability (Arize Phoenix over OpenTelemetry) ------------------------
+# Single tracing path: the one place LLM calls happen is the AsyncOpenAI client,
+# auto-instrumented once with OpenInference so every call becomes an LLM span
+# (prompt, completion, token counts, model, tool calls) — no manual per-attribute
+# re-instrumentation, no second parallel path. Config-driven endpoints.
+OTEL_EXPORTER_OTLP_ENDPOINT = os.environ.get(
+    "OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:6006/v1/traces"
+)
+PHOENIX_PROJECT_NAME = os.environ.get("PHOENIX_PROJECT_NAME", "soc-testbed")
+
+_TRACING_READY = False
+
+
+def init_tracing(service_name: str) -> None:
+    """Set up the OTLP export to Phoenix and auto-instrument the OpenAI client.
+
+    Idempotent per process; best-effort — if anything fails the agent still runs,
+    just without traces (get_tracer returns a no-op when no provider is set).
+    """
+    global _TRACING_READY
+    if _TRACING_READY:
+        return
+    try:
+        from openinference.instrumentation.openai import OpenAIInstrumentor
+        from phoenix.otel import register
+
+        provider = register(
+            endpoint=OTEL_EXPORTER_OTLP_ENDPOINT,
+            project_name=PHOENIX_PROJECT_NAME,
+            protocol="http/protobuf",
+            set_global_tracer_provider=True,
+            auto_instrument=False,
+            batch=True,
+            verbose=False,
+        )
+        OpenAIInstrumentor().instrument(tracer_provider=provider, skip_dep_check=True)
+        _TRACING_READY = True
+        print(f"[tracing] {service_name} -> {OTEL_EXPORTER_OTLP_ENDPOINT} "
+              f"(project {PHOENIX_PROJECT_NAME})", flush=True)
+    except Exception as exc:  # never let telemetry break the agent
+        print(f"[tracing] init failed ({exc}); continuing without tracing", flush=True)
+
+
+def _extract_parent_context(message: Message):
+    """Recover the OTel context a delegating agent injected into the A2A message,
+    so this agent's task span becomes a child of the caller's delegation span —
+    one connected trace across the whole delegation chain."""
+    try:
+        carrier = MessageToDict(message.metadata) if message.metadata else {}
+    except Exception:
+        carrier = {}
+    return otel_extract(carrier) if carrier else None
+
+
+def _inject_context_into(message: Message) -> None:
+    """Carry the current OTel context to the peer over the existing A2A message
+    (its metadata), not a separate transport."""
+    carrier: dict[str, Any] = {}
+    otel_inject(carrier)
+    for key, value in carrier.items():
+        message.metadata[key] = value
 
 
 def listen_config(default_port: int) -> tuple[str, int, str]:
@@ -178,8 +254,7 @@ class LlmToolLoopExecutor(AgentExecutor):
         self._system_prompt = system_prompt
         self._mcp_endpoints = list(mcp_endpoints)
         self._delegations = {d.action_name: d for d in delegations}
-        # One client for the process; safe to share across requests, holds the
-        # connection pool.
+        # One client for the process; safe to share across requests, holds the connection pool.
         self._llm = AsyncOpenAI(
             base_url=INFERENCE_ENDPOINT,
             api_key=INFERENCE_API_KEY,
@@ -259,7 +334,11 @@ class LlmToolLoopExecutor(AgentExecutor):
         return None
 
     async def _delegate(
-        self, endpoint: str, request_text: str, updater: TaskUpdater | None = None
+        self,
+        endpoint: str,
+        request_text: str,
+        updater: TaskUpdater | None = None,
+        label: str | None = None,
     ) -> str:
         """Send a sub-task to a peer agent over A2A and return its answer.
 
@@ -285,23 +364,35 @@ class LlmToolLoopExecutor(AgentExecutor):
             message.reference_task_ids.append(updater.task_id)
             message.context_id = updater.context_id
 
-        async with httpx.AsyncClient(timeout=INFERENCE_TIMEOUT) as http:
-            peer = await create_client(
-                endpoint, ClientConfig(httpx_client=http, streaming=True)
-            )
-            request = SendMessageRequest(message=message)
-            answer = ""
-            async for response in peer.send_message(request):
-                payload = response.WhichOneof("payload")
-                if payload == "status_update":
-                    update = response.status_update
-                    if update.status.HasField("message"):
-                        text = "".join(p.text for p in update.status.message.parts)
-                        if text:
-                            answer = text
-                elif payload == "message":
-                    answer = "".join(p.text for p in response.message.parts)
-            return answer or "(peer agent returned no content)"
+        tracer = otel_trace.get_tracer("soc_agent")
+        span_name = f"delegate -> {label}" if label else "delegate"
+        with tracer.start_as_current_span(span_name) as span:
+            span.set_attribute("a2a.delegate.endpoint", endpoint)
+            span.set_attribute("openinference.span.kind", "CHAIN")
+            if label:
+                span.set_attribute("a2a.delegate.peer", label)
+            if updater is not None:
+                span.set_attribute("a2a.parent_task_id", updater.task_id)
+            # Carry the trace context to the peer over the A2A message itself.
+            _inject_context_into(message)
+
+            async with httpx.AsyncClient(timeout=INFERENCE_TIMEOUT) as http:
+                peer = await create_client(
+                    endpoint, ClientConfig(httpx_client=http, streaming=True)
+                )
+                request = SendMessageRequest(message=message)
+                answer = ""
+                async for response in peer.send_message(request):
+                    payload = response.WhichOneof("payload")
+                    if payload == "status_update":
+                        update = response.status_update
+                        if update.status.HasField("message"):
+                            text = "".join(p.text for p in update.status.message.parts)
+                            if text:
+                                answer = text
+                    elif payload == "message":
+                        answer = "".join(p.text for p in response.message.parts)
+                return answer or "(peer agent returned no content)"
 
     # ---- the loop ------------------------------------------------------------
 
@@ -341,6 +432,7 @@ class LlmToolLoopExecutor(AgentExecutor):
                     tools=tools,
                     temperature=0,
                     max_tokens=INFERENCE_MAX_TOKENS,
+                    extra_body=INFERENCE_THINK
                 )
                 choice = completion.choices[0].message
 
@@ -394,7 +486,8 @@ class LlmToolLoopExecutor(AgentExecutor):
                     if name in self._delegations:
                         request = arguments.get("request", "")
                         content = await self._delegate(
-                            self._delegations[name].endpoint, request, updater
+                            self._delegations[name].endpoint, request, updater,
+                            label=name,
                         )
                         # Let a subclass record the verdict for later gating.
                         content = self._on_delegation_result(
@@ -459,21 +552,42 @@ class LlmToolLoopExecutor(AgentExecutor):
 
         user_input = context.get_user_input()
 
-        # The task stays in WORKING for the whole loop; each action emits an
-        # interim status update from inside _run_tool_loop.
-        try:
-            response_text = await self._produce_result(user_input, updater)
-        except Exception as exc:  # surface the cause instead of a bare error state
-            await updater.failed(
-                message=updater.new_agent_message(
-                    [Part(text=f"{self._label} loop failed: {exc}")]
+        # One span per agent task, parented by the caller's injected context so
+        # the whole delegation chain is a single connected trace in Phoenix. The
+        # auto-instrumented LLM spans (and delegation spans) nest under it.
+        tracer = otel_trace.get_tracer("soc_agent")
+        parent_ctx = _extract_parent_context(context.message)
+        with tracer.start_as_current_span(
+            f"{self._label}.task", context=parent_ctx
+        ) as span:
+            span.set_attribute("agent.name", self._label)
+            span.set_attribute("a2a.task_id", context.task_id)
+            span.set_attribute("a2a.context_id", context.context_id)
+            span.set_attribute("openinference.span.kind", "AGENT")
+            refs = list(context.message.reference_task_ids)
+            if refs:
+                span.set_attribute("a2a.parent_task_id", refs[0])
+            if isinstance(self, WorkflowExecutor):
+                span.set_attribute(
+                    "workflow.depth", self._workflow.depth(self._agent_name)
                 )
-            )
-            return
 
-        await updater.complete(
-            message=updater.new_agent_message([Part(text=response_text)])
-        )
+            # The task stays in WORKING for the whole loop; each action emits an
+            # interim status update from inside _run_tool_loop.
+            try:
+                response_text = await self._produce_result(user_input, updater)
+            except Exception as exc:  # surface the cause, not a bare error state
+                span.record_exception(exc)
+                await updater.failed(
+                    message=updater.new_agent_message(
+                        [Part(text=f"{self._label} loop failed: {exc}")]
+                    )
+                )
+                return
+
+            await updater.complete(
+                message=updater.new_agent_message([Part(text=response_text)])
+            )
 
     async def cancel(
         self, context: RequestContext, event_queue: EventQueue
@@ -553,16 +667,24 @@ class Workflow:
         return dist.get(agent, 0) + 1
 
     def branch_for_severity(self, severity: str | None) -> str:
-        """Map a severity label to 'escalate' or 'benign' via the file threshold."""
+        """Map a severity label to 'escalate' | 'benign' | 'needs_review'.
+
+        A recognized severity routes by the file threshold. Anything the model
+        did NOT classify cleanly — a missing marker (None) or a value outside
+        `severity_order` — routes to 'needs_review' instead of guessing:
+        neither fail-open (escalate everything, false-positive containment) nor
+        fail-closed (dismiss real incidents). needs_review is an inert, logged
+        terminal (see WorkflowExecutor._needs_review_terminal).
+        """
         b = self._d["branch"]
         order = [s.lower() for s in b["severity_order"]]
         threshold = order.index(b["escalate_at"].lower())
         if severity is None:
-            return "escalate"  # fail toward escalation when the signal is missing
+            return "needs_review"  # no parseable classification -> human review
         try:
             rank = order.index(severity.strip().lower())
         except ValueError:
-            return "escalate"  # unknown severity -> escalate rather than dismiss
+            return "needs_review"  # off-spec severity -> human review, not a guess
         return "escalate" if rank >= threshold else "benign"
 
 
@@ -601,6 +723,35 @@ class WorkflowExecutor(LlmToolLoopExecutor):
         self._log(f"classified severity={severity!r} -> branch={branch}")
         return branch
 
+    def _needs_review_terminal(self, user_text: str, own_output: str) -> str:
+        """Inert, logged terminal for an alert the decider could not classify.
+
+        No delegation, no tools, no containment — just a structured record and a
+        log/trace marker so a human (or an offline sweep) can pick it up. Returned
+        as the task result in the same disposition shape the Reporter emits, so
+        downstream consumers parse it uniformly.
+        """
+        record = {
+            "disposition": "needs_review",
+            "severity": "unclassified",
+            "action_taken": "none",
+            "reason": (
+                "Triage produced no parseable severity classification; routed to "
+                "the inert needs-review terminal (not escalated, not dismissed)."
+            ),
+            "classification_output": own_output.strip()[:500],
+            "alert": user_text.strip()[:2000],
+        }
+        payload = json.dumps(record)
+        self._log(f"NEEDS-REVIEW terminal (inert, no pipeline, no action): {payload}")
+        span = otel_trace.get_current_span()  # the agent's AGENT-kind task span
+        try:
+            span.set_attribute("workflow.disposition", "needs_review")
+            span.set_attribute("workflow.needs_review", True)
+        except Exception:
+            pass
+        return payload
+
     async def _produce_result(self, user_text: str, updater: TaskUpdater) -> str:
         depth = self._workflow.depth(self._agent_name)
         self._log(f"received (depth {depth}); running local work")
@@ -613,6 +764,14 @@ class WorkflowExecutor(LlmToolLoopExecutor):
         )
 
         branch = self._branch(own_output)
+
+        # Unclassifiable alerts do NOT enter the pipeline and are NOT dismissed.
+        # They terminate here in an inert, logged needs-review state — decided
+        # deterministically, so an unreliable classification cannot cascade into
+        # (a) a false-positive containment or (b) a silently-dropped incident.
+        if branch == "needs_review":
+            return self._needs_review_terminal(user_text, own_output)
+
         successors = self._workflow.successors(self._agent_name, branch)
         if not successors:
             self._log(f"terminal on branch '{branch}'; unwinding result up")
@@ -633,7 +792,7 @@ class WorkflowExecutor(LlmToolLoopExecutor):
                 ),
             )
             self._log(f"delegating to {succ} (depth {succ_depth}); awaiting")
-            result = await self._delegate(url, feed, updater)
+            result = await self._delegate(url, feed, updater, label=succ)
             self._log(f"{succ} returned; unwinding")
             feed = result  # the next successor (if any) sees the prior's result
         return result
@@ -641,6 +800,8 @@ class WorkflowExecutor(LlmToolLoopExecutor):
 
 def build_app(executor: AgentExecutor, agent_card: AgentCard) -> Starlette:
     """Compose the A2A server app: agent-card route + JSON-RPC route."""
+    # Stand up the single tracing path once, at app build time.
+    init_tracing(agent_card.name)
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=InMemoryTaskStore(),

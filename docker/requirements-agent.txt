@@ -1,0 +1,14 @@
+# Agent image deps — pinned to the versions proven in the dev conda env.
+# NOTE: the full `arize-phoenix` SERVER is deliberately NOT here — only the
+# lightweight `arize-phoenix-otel` client. The server pulls fastmcp-slim, which
+# pins mcp<2 and would break our mcp==2.0.0 tool/agent SDK. Phoenix runs as its
+# own container (arizephoenix/phoenix image), so that conflict never enters here.
+a2a-sdk==1.1.2
+mcp==2.0.0
+openai==3.3.1
+arize-phoenix-otel==0.17.1
+openinference-instrumentation-openai==0.1.54
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+PyYAML==6.0.3
+uvicorn==0.52.1

@@ -26,16 +26,24 @@ Endpoint:
 from __future__ import annotations
 
 import os
+import pathlib
+import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from mcp_db import execute  # noqa: E402  (shared DB helper, tool image)
+
 # Matches the container env convention in deployment/base/tools/ticketing.yaml.
 HOST = os.environ.get("MCP_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_LISTEN_PORT", "7005"))
 PATH = os.environ.get("MCP_PATH", "/mcp")
+OPERATIONAL_DB_URL = os.environ.get(
+    "OPERATIONAL_DB_URL", "postgresql://soc:soc@127.0.0.1:5432/soc_operational"
+)
 
 server = MCPServer(
     name="ticketing",
@@ -60,10 +68,17 @@ def _write_incident(
     #   created_at) VALUES (...) RETURNING id  (operational Postgres, data zone).
     #   NOTHING IS PERSISTED YET — the id is minted in-process and forgotten.
 
-    STUB: generates an incident id and returns a success receipt without
-    storing anything.
+    Now a real INSERT into the operational `incidents` table; the receipt shape
+    is unchanged, with `persisted` now True.
     """
     incident_id = f"INC-{uuid.uuid4().hex[:8].upper()}"
+    created = _now()
+    execute(
+        OPERATIONAL_DB_URL,
+        "INSERT INTO incidents (incident_id, status, title, description, severity, "
+        "assignee, created_at, updated_at) VALUES (%s,'created',%s,%s,%s,%s,%s,%s)",
+        (incident_id, title, description, severity, assignee, created, created),
+    )
     return {
         "incident_id": incident_id,
         "status": "created",
@@ -71,8 +86,8 @@ def _write_incident(
         "description": description,
         "severity": severity,
         "assignee": assignee,
-        "created_at": _now(),
-        "persisted": False,  # honest: no store behind this yet
+        "created_at": created,
+        "persisted": True,
     }
 
 
@@ -86,15 +101,23 @@ def _write_incident_update(
     #   id = :incident_id; INSERT INTO incident_notes (...)  (operational Postgres).
     #   NOTHING IS PERSISTED YET.
 
-    STUB: returns a success receipt without storing anything. Does not verify
-    that `incident_id` exists.
+    Now a real UPDATE of the operational `incidents` row (a no-op if the id does
+    not exist — still does not verify existence, matching the stub). Receipt
+    shape unchanged, `persisted` now True.
     """
+    updated = _now()
+    execute(
+        OPERATIONAL_DB_URL,
+        "UPDATE incidents SET status = COALESCE(%s, status), note = %s, "
+        "updated_at = %s WHERE incident_id = %s",
+        (status, note, updated, incident_id),
+    )
     return {
         "incident_id": incident_id,
         "status": status or "updated",
         "note": note,
-        "updated_at": _now(),
-        "persisted": False,  # honest: no store behind this yet
+        "updated_at": updated,
+        "persisted": True,
     }
 
 

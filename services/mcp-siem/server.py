@@ -28,14 +28,23 @@ Endpoint:
 from __future__ import annotations
 
 import os
+import pathlib
+import sys
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from mcp_db import rows  # noqa: E402  (shared DB helper, tool image)
 
 # Matches the container env convention in deployment/base/tools/siem.yaml.
 HOST = os.environ.get("MCP_LISTEN_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MCP_LISTEN_PORT", "7001"))
 PATH = os.environ.get("MCP_PATH", "/mcp")
+# Operational store, from config (container network in compose).
+OPERATIONAL_DB_URL = os.environ.get(
+    "OPERATIONAL_DB_URL", "postgresql://soc:soc@127.0.0.1:5432/soc_operational"
+)
 
 server = MCPServer(
     name="siem",
@@ -43,35 +52,29 @@ server = MCPServer(
     instructions="Synthetic SOC SIEM. Provides access to security alerts for triage.",
 )
 
-# One fixed, plausible alert so agents have something structurally realistic to
-# reason over. Fields mirror a normalized SIEM alert record.
-_CANNED_ALERT: dict[str, Any] = {
-    "id": "alert-0001",
-    "timestamp": "2026-08-02T14:23:17Z",
-   #"severity": "high",
-    "source_ip": "10.14.7.32",
-    "dest_ip": "198.51.100.77",
-    "rule_name": "Suspicious Outbound Data Transfer",
-    "description": (
-        "Host 10.14.7.32 transferred 4.2 GB to external address 198.51.100.77 "
-        "over 11 minutes, exceeding the baseline for this asset by 40x."
-    ),
-}
-
-
 def _fetch_alerts(since: str | None, limit: int) -> list[dict[str, Any]]:
-    """DATA-ACCESS SEAM (read). The single place a real DB query will go.
+    """DATA-ACCESS SEAM (read) — backed by the operational `alerts` table.
 
-    # TODO: replace canned return with real DB query
-    #   e.g. SELECT ... FROM alerts WHERE ts > :since ORDER BY ts DESC LIMIT :limit
-    #   against the operational Postgres in the data zone.
-
-    STUB: `since` is ignored entirely and the canned alert is returned
-    regardless of its timestamp. `limit` truncates the single-element canned
-    list, so any limit >= 1 yields the same one alert.
+    Return shape is unchanged from the stub: a list of
+    {id, timestamp, source_ip, dest_ip, rule_name, description} dicts (no
+    severity key, matching the prior canned alert). Now backed by real storage:
+    `since` filters by timestamp (was ignored in the stub) and `limit` bounds
+    the rows, newest first.
     """
-    alerts = [_CANNED_ALERT]
-    return alerts[:limit] if limit >= 0 else alerts
+    sql = (
+        "SELECT id, "
+        "to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS timestamp, "
+        "source_ip, dest_ip, rule_name, description FROM alerts"
+    )
+    params: list[Any] = []
+    if since:
+        sql += " WHERE ts > %s"
+        params.append(since)
+    sql += " ORDER BY ts DESC"
+    if limit is not None and limit >= 0:
+        sql += " LIMIT %s"
+        params.append(limit)
+    return rows(OPERATIONAL_DB_URL, sql, tuple(params))
 
 
 @server.tool(
