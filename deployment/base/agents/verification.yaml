@@ -1,0 +1,41 @@
+# agent-zone / verification-agent — A2A server on 9106 (consulted by response).
+# NEW vs the earlier scaffold, which predated this sixth agent.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verification-agent
+  namespace: agent-zone
+  labels: {app.kubernetes.io/name: verification-agent, zone: agent-zone, tier: agent}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: verification-agent}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: verification-agent, zone: agent-zone, tier: agent}
+    spec:
+      containers:
+        - name: agent
+          image: soc-agent
+          command: ["python", "services/verification-agent/server.py"]
+          ports:
+            - {name: a2a, containerPort: 9106}
+          env:
+            - name: A2A_PUBLIC_URL
+              value: "http://verification-agent.agent-zone.svc.cluster.local:9106/"
+          envFrom:
+            - configMapRef: {name: agent-common-config}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: verification-agent
+  namespace: agent-zone
+  labels: {app.kubernetes.io/name: verification-agent, zone: agent-zone, tier: agent}
+spec:
+  selector: {app.kubernetes.io/name: verification-agent}
+  ports:
+    - {name: a2a, port: 9106, targetPort: a2a}

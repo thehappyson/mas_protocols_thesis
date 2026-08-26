@@ -1,0 +1,37 @@
+# agent-zone / shared agent config — the compose `x-agent-env` anchor as a
+# ConfigMap. Every agent envFrom's this; each agent adds only its own
+# A2A_PUBLIC_URL. All peer/tool/inference/tracing endpoints are cluster DNS.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-common-config
+  namespace: agent-zone
+  labels:
+    app.kubernetes.io/name: agent-common-config
+    zone: agent-zone
+    tier: agent
+data:
+  # Inference: OpenAI-compatible endpoint. In compose this is host Ollama via
+  # host.docker.internal — there is NO host gateway in-cluster.
+  # TODO(REPLACE_ME): point at an in-cluster dev-inference Service (Ollama/vLLM)
+  # or an ExternalName to a reachable endpoint. Placeholder below does NOT resolve.
+  INFERENCE_ENDPOINT: "http://REPLACE_ME-inference.platform-zone.svc.cluster.local:11434/v1"
+  INFERENCE_MODEL: "llama3.1:8b"
+  A2A_LISTEN_HOST: "0.0.0.0"
+  # Tracing → Phoenix (OTLP/HTTP on 6006), matching the compose endpoint path.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://phoenix.platform-zone.svc.cluster.local:6006/v1/traces"
+  PHOENIX_PROJECT_NAME: "soc-testbed"
+  # Peer A2A endpoints (workflow resolves successors via these).
+  TRIAGE_A2A_ENDPOINT: "http://triage-agent.agent-zone.svc.cluster.local:9101"
+  ENRICHMENT_A2A_ENDPOINT: "http://enrichment-agent.agent-zone.svc.cluster.local:9102"
+  CORRELATION_A2A_ENDPOINT: "http://correlation-agent.agent-zone.svc.cluster.local:9103"
+  RESPONSE_A2A_ENDPOINT: "http://response-agent.agent-zone.svc.cluster.local:9104"
+  REPORTER_A2A_ENDPOINT: "http://reporter-agent.agent-zone.svc.cluster.local:9105"
+  VERIFICATION_A2A_ENDPOINT: "http://verification-agent.agent-zone.svc.cluster.local:9106"
+  # MCP tool endpoints (agents open these per task).
+  SIEM_MCP_ENDPOINT: "http://mcp-siem.tool-zone.svc.cluster.local:7001/mcp"
+  CMDB_MCP_ENDPOINT: "http://mcp-cmdb.tool-zone.svc.cluster.local:7002/mcp"
+  THREAT_INTEL_MCP_ENDPOINT: "http://mcp-threat-intel.tool-zone.svc.cluster.local:7003/mcp"
+  RUNBOOK_MCP_ENDPOINT: "http://mcp-runbook.tool-zone.svc.cluster.local:7004/mcp"
+  TICKETING_MCP_ENDPOINT: "http://mcp-ticketing.tool-zone.svc.cluster.local:7005/mcp"
+  CONTAINMENT_MCP_ENDPOINT: "http://mcp-containment.tool-zone.svc.cluster.local:7006/mcp"

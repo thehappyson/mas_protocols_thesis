@@ -1,34 +1,42 @@
-# data-endpoints — single source of truth for data-zone service DNS, one
-# ConfigMap per consuming zone (envFrom'd by the MCP tool servers and the
-# experiment harness).
+# Data-zone DB endpoints as FULL DSNs (the tool/generator code reads
+# OPERATIONAL_DB_URL / AUDIT_DB_URL, not host/port). Kept in small, per-consumer
+# ConfigMaps so the minimal overlay rewrites the DSNs in a few known objects
+# when it folds data-zone into platform-zone.
 #
-# WHY THIS EXISTS: the minimal overlay folds data-zone into platform-zone,
-# which changes these DNS names. Keeping them in exactly two ConfigMaps means
-# the overlay rewrites two objects instead of hunting through every workload.
+# SEPARATION: operational and audit DSNs live in SEPARATE ConfigMaps so the
+# containment tool can mount ONLY the audit DSN (audit-endpoints) and never the
+# operational one — mirroring the compose credential separation.
+#
+# TODO(security): these DSNs embed dev credentials (soc/soc, audit_admin/audit),
+# matching compose's plain env. Move credentials to a Secret for the reportable
+# tier; keep the host/port/db here.
+---
+# Operational DSN — the 5 read/write tools (tool-zone) and the workload generator.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: data-endpoints
   namespace: tool-zone
-  labels:
-    app.kubernetes.io/name: data-endpoints
-    zone: tool-zone
+  labels: {app.kubernetes.io/name: data-endpoints, zone: tool-zone}
 data:
-  OPERATIONAL_DB_HOST: postgres-operational.data-zone.svc.cluster.local
-  OPERATIONAL_DB_PORT: "5432"
-  AUDIT_DB_HOST: postgres-audit.data-zone.svc.cluster.local
-  AUDIT_DB_PORT: "5433"
+  OPERATIONAL_DB_URL: "postgresql://soc:soc@postgres-operational.data-zone.svc.cluster.local:5432/soc_operational"
 ---
+# Audit DSN — the containment tool ONLY.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-endpoints
+  namespace: tool-zone
+  labels: {app.kubernetes.io/name: audit-endpoints, zone: tool-zone}
+data:
+  AUDIT_DB_URL: "postgresql://audit_admin:audit@postgres-audit.data-zone.svc.cluster.local:5433/soc_audit"
+---
+# Operational DSN copy for the experiment-zone workload generator.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: data-endpoints
   namespace: experiment-zone
-  labels:
-    app.kubernetes.io/name: data-endpoints
-    zone: experiment-zone
+  labels: {app.kubernetes.io/name: data-endpoints, zone: experiment-zone}
 data:
-  OPERATIONAL_DB_HOST: postgres-operational.data-zone.svc.cluster.local
-  OPERATIONAL_DB_PORT: "5432"
-  AUDIT_DB_HOST: postgres-audit.data-zone.svc.cluster.local
-  AUDIT_DB_PORT: "5433"
+  OPERATIONAL_DB_URL: "postgresql://soc:soc@postgres-operational.data-zone.svc.cluster.local:5432/soc_operational"

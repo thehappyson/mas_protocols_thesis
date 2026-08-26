@@ -2,22 +2,23 @@
 # soc-testbed — MINIMAL overlay (dev/troubleshooting tier, NON-REPORTABLE)
 #
 # Minimal is the ONE tier allowed to deviate structurally from the shared
-# topology, and this file IS that deviation, spelled out patch by patch:
-# the data zone is folded into platform-zone (4 zones instead of 5), so any
-# measurement taken here cannot be compared with basic/scaled — which is
-# exactly why minimal is non-reportable. Everything else (all 5 agents, all
-# 6 tools, single replicas) is inherited from base unchanged.
+# topology, and this file IS that deviation, spelled out patch by patch: the
+# data zone is folded into platform-zone (4 zones instead of 5). Any measurement
+# taken here cannot be compared with reportable/scaled — which is exactly why
+# minimal is non-reportable. Everything else (6 agents, 6 tools, Phoenix, the
+# standing Memgraph, single replicas) is inherited from base unchanged.
 #
-# NETWORKING: like base, this overlay is OPEN BY DEFAULT — it does NOT include
+# NETWORKING: like base, OPEN BY DEFAULT — this overlay does NOT include
 # components/network-policies (and must not without adapting the data-zone
 # policies, since data-zone does not exist here).
 #
-# Patch mechanics: every patch has an explicit `target:` selector, one entry
-# per touched object, so the whole fold is enumerable by reading this file.
-# The namespace MOVES use JSON6902 `replace` ops because a strategic-merge
-# patch cannot change metadata.namespace (namespace is part of the object's
-# merge identity, so kustomize silently drops the field — verified). The
-# value REWRITES (data-endpoints) and the namespace DELETE are strategic-merge.
+# Render/validate (base single-sources init SQL from docker/initdb, outside base/):
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/minimal
+#
+# Patch mechanics: every namespace MOVE is a JSON6902 `replace` on
+# /metadata/namespace (a strategic-merge patch cannot change metadata.namespace —
+# it is part of the object's merge identity, so kustomize silently drops it).
+# The DSN value rewrites and the namespace DELETE are strategic-merge.
 # =============================================================================
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -31,13 +32,8 @@ labels:
       soc-testbed.io/config-tier: minimal
 
 patches:
-  # --------------------------------------------------------------------------
   # 1) Remove the data-zone namespace — it does not exist in minimal.
-  # --------------------------------------------------------------------------
-  - target:
-      version: v1
-      kind: Namespace
-      name: data-zone
+  - target: {version: v1, kind: Namespace, name: data-zone}
     patch: |-
       apiVersion: v1
       kind: Namespace
@@ -45,90 +41,47 @@ patches:
         name: data-zone
       $patch: delete
 
-  # --------------------------------------------------------------------------
-  # 2) Move every data-zone object into platform-zone.
-  #    The `zone: data-zone` label is intentionally KEPT on these objects:
-  #    after the fold it records logical origin ("this is data-plane
-  #    infrastructure"), not namespace placement.
-  # --------------------------------------------------------------------------
-  # postgres-operational: Secret, Service, StatefulSet
-  - target:
-      version: v1
-      kind: Secret
-      name: postgres-operational-credentials
-      namespace: data-zone
+  # 2) Move every data-zone object into platform-zone. The `zone: data-zone`
+  #    label is intentionally KEPT — after the fold it records logical origin
+  #    (data-plane infrastructure), not namespace placement.
+  # -- postgres-operational: Secret, Service, StatefulSet, init ConfigMap --------
+  - target: {version: v1, kind: Secret, name: postgres-operational-credentials, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
-  - target:
-      version: v1
-      kind: Service
-      name: postgres-operational
-      namespace: data-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {version: v1, kind: Service, name: postgres-operational, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
-  - target:
-      group: apps
-      version: v1
-      kind: StatefulSet
-      name: postgres-operational
-      namespace: data-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {group: apps, version: v1, kind: StatefulSet, name: postgres-operational, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
-  # postgres-audit: Secret, init ConfigMap, Service, StatefulSet
-  - target:
-      version: v1
-      kind: Secret
-      name: postgres-audit-credentials
-      namespace: data-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {version: v1, kind: ConfigMap, name: postgres-operational-init, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
-  - target:
-      version: v1
-      kind: ConfigMap
-      name: postgres-audit-init
-      namespace: data-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  # -- postgres-audit: Secret, Service, StatefulSet, init ConfigMap --------------
+  - target: {version: v1, kind: Secret, name: postgres-audit-credentials, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
-  - target:
-      version: v1
-      kind: Service
-      name: postgres-audit
-      namespace: data-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {version: v1, kind: Service, name: postgres-audit, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
-  - target:
-      group: apps
-      version: v1
-      kind: StatefulSet
-      name: postgres-audit
-      namespace: data-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {group: apps, version: v1, kind: StatefulSet, name: postgres-audit, namespace: data-zone}
     patch: |-
-      - op: replace
-        path: /metadata/namespace
-        value: platform-zone
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {version: v1, kind: ConfigMap, name: postgres-audit-init, namespace: data-zone}
+    patch: |-
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  # -- memgraph (standing/unwired): Deployment, Service -------------------------
+  - target: {group: apps, version: v1, kind: Deployment, name: memgraph, namespace: data-zone}
+    patch: |-
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
+  - target: {version: v1, kind: Service, name: memgraph, namespace: data-zone}
+    patch: |-
+      - {op: replace, path: /metadata/namespace, value: platform-zone}
 
-  # --------------------------------------------------------------------------
-  # 3) Rewrite data-zone DNS to the new home. base/data/endpoints.yaml keeps
-  #    all data-zone DNS in these two ConfigMaps precisely so the fold is a
-  #    two-object rewrite.
-  # --------------------------------------------------------------------------
-  - target:
-      version: v1
-      kind: ConfigMap
-      name: data-endpoints
-      namespace: tool-zone
+  # 3) Rewrite the DB DSNs to the new home. base/data/endpoints.yaml keeps them
+  #    in these three small ConfigMaps precisely so the fold is a three-value
+  #    rewrite rather than a hunt through every workload.
+  - target: {version: v1, kind: ConfigMap, name: data-endpoints, namespace: tool-zone}
     patch: |-
       apiVersion: v1
       kind: ConfigMap
@@ -136,13 +89,17 @@ patches:
         name: data-endpoints
         namespace: tool-zone
       data:
-        OPERATIONAL_DB_HOST: postgres-operational.platform-zone.svc.cluster.local
-        AUDIT_DB_HOST: postgres-audit.platform-zone.svc.cluster.local
-  - target:
-      version: v1
+        OPERATIONAL_DB_URL: "postgresql://soc:soc@postgres-operational.platform-zone.svc.cluster.local:5432/soc_operational"
+  - target: {version: v1, kind: ConfigMap, name: audit-endpoints, namespace: tool-zone}
+    patch: |-
+      apiVersion: v1
       kind: ConfigMap
-      name: data-endpoints
-      namespace: experiment-zone
+      metadata:
+        name: audit-endpoints
+        namespace: tool-zone
+      data:
+        AUDIT_DB_URL: "postgresql://audit_admin:audit@postgres-audit.platform-zone.svc.cluster.local:5433/soc_audit"
+  - target: {version: v1, kind: ConfigMap, name: data-endpoints, namespace: experiment-zone}
     patch: |-
       apiVersion: v1
       kind: ConfigMap
@@ -150,5 +107,4 @@ patches:
         name: data-endpoints
         namespace: experiment-zone
       data:
-        OPERATIONAL_DB_HOST: postgres-operational.platform-zone.svc.cluster.local
-        AUDIT_DB_HOST: postgres-audit.platform-zone.svc.cluster.local
+        OPERATIONAL_DB_URL: "postgresql://soc:soc@postgres-operational.platform-zone.svc.cluster.local:5432/soc_operational"

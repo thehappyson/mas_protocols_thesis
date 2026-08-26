@@ -1,0 +1,39 @@
+# data-zone / memgraph — STANDING BUT UNWIRED. Present so the data zone matches
+# the running system, but NO agent or tool references it: it is an offline
+# trust-graph analysis instrument (populated later from delegation logs), never
+# on the runtime request path. Ephemeral (no PVC), as in compose.
+# TODO: pin the image tag (…:latest below).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memgraph
+  namespace: data-zone
+  labels: {app.kubernetes.io/name: memgraph, zone: data-zone, tier: data}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: memgraph}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: memgraph, zone: data-zone, tier: data}
+    spec:
+      containers:
+        - name: memgraph
+          image: memgraph/memgraph:latest
+          args: ["--bolt-port=7687", "--log-level=WARNING", "--telemetry-enabled=false"]
+          ports:
+            - {name: bolt, containerPort: 7687}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memgraph
+  namespace: data-zone
+  labels: {app.kubernetes.io/name: memgraph, zone: data-zone, tier: data}
+spec:
+  selector: {app.kubernetes.io/name: memgraph}
+  ports:
+    - {name: bolt, port: 7687, targetPort: bolt}

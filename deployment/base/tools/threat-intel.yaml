@@ -1,66 +1,40 @@
-# tool-zone / mcp-threat-intel — MCP tool server, streamable HTTP on 7003. Internals stubbed.
-# Placeholder image: REPLACE_ME/mcp-threat-intel:dev
+# tool-zone / mcp-threat-intel — MCP streamable-HTTP server on 7003. Reads operational DB.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mcp-threat-intel
   namespace: tool-zone
-  labels:
-    app.kubernetes.io/name: mcp-threat-intel
-    zone: tool-zone
-    tier: tool
+  labels: {app.kubernetes.io/name: mcp-threat-intel, zone: tool-zone, tier: tool}
 spec:
   replicas: 1
   selector:
-    matchLabels:
-      app.kubernetes.io/name: mcp-threat-intel
+    matchLabels: {app.kubernetes.io/name: mcp-threat-intel}
   template:
     metadata:
-      labels:
-        app.kubernetes.io/name: mcp-threat-intel
-        zone: tool-zone
-        tier: tool
+      labels: {app.kubernetes.io/name: mcp-threat-intel, zone: tool-zone, tier: tool}
     spec:
       containers:
         - name: server
-          image: REPLACE_ME/mcp-threat-intel:dev
+          image: soc-tool
+          command: ["python", "services/mcp-threat-intel/server.py"]
           ports:
-            - name: mcp-http
-              containerPort: 7003
+            - {name: mcp-http, containerPort: 7003}
           env:
-            - name: MCP_TRANSPORT
-              value: streamable-http
-            - name: MCP_LISTEN_PORT
-              value: "7003"
-            - name: TTP_ENDPOINT
-              value: https://trust-anchor.platform-zone.svc.cluster.local:8443
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+            - {name: MCP_LISTEN_HOST, value: "0.0.0.0"}
+            - {name: MCP_LISTEN_PORT, value: "7003"}
           envFrom:
-            - configMapRef:
-                name: data-endpoints
-          # Unprofiled guesses — tune after first load tests.
+            - configMapRef: {name: data-endpoints}
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: mcp-threat-intel
   namespace: tool-zone
-  labels:
-    app.kubernetes.io/name: mcp-threat-intel
-    zone: tool-zone
-    tier: tool
+  labels: {app.kubernetes.io/name: mcp-threat-intel, zone: tool-zone, tier: tool}
 spec:
-  selector:
-    app.kubernetes.io/name: mcp-threat-intel
+  selector: {app.kubernetes.io/name: mcp-threat-intel}
   ports:
-    - name: mcp-http
-      port: 7003
-      targetPort: mcp-http
+    - {name: mcp-http, port: 7003, targetPort: mcp-http}

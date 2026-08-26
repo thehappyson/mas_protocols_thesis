@@ -1,101 +1,74 @@
-# data-zone / postgres-operational — operational store with pgvector, on 5432.
-# Image: official pgvector build (sensible default, confirm/pin as needed).
-# NOTE: Memgraph is deliberately NOT deployed — it is an offline analysis
-# instrument, not a runtime component of the data zone.
+# data-zone / postgres-operational — operational store on 5432 (postgres:16, NOT
+# pgvector: runbook search is keyword-based). Schema + seed + the agent-invisible
+# ground-truth table come from the postgres-operational-init ConfigMap, generated
+# from docker/initdb/operational/*.sql (the same SQL compose uses).
 apiVersion: v1
 kind: Secret
 metadata:
   name: postgres-operational-credentials
   namespace: data-zone
-  labels:
-    app.kubernetes.io/name: postgres-operational
-    zone: data-zone
-    tier: data
+  labels: {app.kubernetes.io/name: postgres-operational, zone: data-zone, tier: data}
 type: Opaque
 stringData:
-  # TODO: replace before any shared deployment — dev-only placeholders.
+  # Dev credentials, matching compose. Must match OPERATIONAL_DB_URL in
+  # data/endpoints.yaml. TODO: rotate + manage as a real Secret for shared deploy.
   POSTGRES_USER: soc
-  POSTGRES_PASSWORD: TODO-REPLACE-ME-dev-only
+  POSTGRES_PASSWORD: soc
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres-operational
   namespace: data-zone
-  labels:
-    app.kubernetes.io/name: postgres-operational
-    zone: data-zone
-    tier: data
+  labels: {app.kubernetes.io/name: postgres-operational, zone: data-zone, tier: data}
 spec:
-  clusterIP: None
-  selector:
-    app.kubernetes.io/name: postgres-operational
+  clusterIP: None          # headless, governs the StatefulSet
+  selector: {app.kubernetes.io/name: postgres-operational}
   ports:
-    - name: postgres
-      port: 5432
-      targetPort: postgres
+    - {name: postgres, port: 5432, targetPort: postgres}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres-operational
   namespace: data-zone
-  labels:
-    app.kubernetes.io/name: postgres-operational
-    zone: data-zone
-    tier: data
+  labels: {app.kubernetes.io/name: postgres-operational, zone: data-zone, tier: data}
 spec:
   serviceName: postgres-operational
   replicas: 1
   selector:
-    matchLabels:
-      app.kubernetes.io/name: postgres-operational
+    matchLabels: {app.kubernetes.io/name: postgres-operational}
   template:
     metadata:
-      labels:
-        app.kubernetes.io/name: postgres-operational
-        zone: data-zone
-        tier: data
+      labels: {app.kubernetes.io/name: postgres-operational, zone: data-zone, tier: data}
     spec:
       containers:
         - name: postgres
-          # Default chosen (official pgvector image) — confirm/pin version.
-          image: pgvector/pgvector:pg16
+          image: postgres:16
           ports:
-            - name: postgres
-              containerPort: 5432
+            - {name: postgres, containerPort: 5432}
           env:
-            - name: POSTGRES_DB
-              value: soc_operational
-            - name: PGDATA
-              value: /var/lib/postgresql/data/pgdata
+            - {name: POSTGRES_DB, value: soc_operational}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
           envFrom:
-            - secretRef:
-                name: postgres-operational-credentials
+            - secretRef: {name: postgres-operational-credentials}
           volumeMounts:
-            - name: data
-              mountPath: /var/lib/postgresql/data
-          # Unprofiled guesses — tune after first load tests.
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true}
           resources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "1"
-              memory: 2Gi
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 2Gi}
+      volumes:
+        - name: init
+          configMap: {name: postgres-operational-init}
   volumeClaimTemplates:
     - metadata:
         name: data
-        labels:
-          app.kubernetes.io/name: postgres-operational
-          zone: data-zone
-          tier: data
+        labels: {app.kubernetes.io/name: postgres-operational, zone: data-zone, tier: data}
       spec:
         accessModes: ["ReadWriteOnce"]
-        # TODO(Hyperstack): set the correct storageClassName for the target
-        # cluster. Left unset so the cluster default class is used — flagging
-        # this as a commented sensible default, not a decision.
+        # TODO(Hyperstack): set storageClassName for the target cluster. Left
+        # unset → cluster default class. Not a decision, a placeholder.
         # storageClassName: REPLACE_ME-hyperstack-storage-class
         resources:
-          requests:
-            storage: 10Gi
+          requests: {storage: 10Gi}

@@ -1,82 +1,101 @@
 # =============================================================================
-# soc-testbed — BASE (full 5-zone topology, every workload at replica 1)
+# soc-testbed — BASE (full 5-zone topology, faithful translation of the working
+# docker-compose system: 6 agents, 6 MCP tools, Phoenix, 2 Postgres + a standing
+# Memgraph, and the out-of-band workload generator). Every workload is replica 1.
 #
-# This base is the shared topology for the "basic" and "scaled" tiers.
-# The "minimal" tier lives in overlays/minimal/ and is the ONLY tier allowed
-# to deviate structurally (it folds data-zone into platform-zone), which is
-# exactly why minimal is non-reportable.
+# This base is the shared topology for the reportable and scaled tiers. The
+# minimal tier (overlays/minimal/) is the ONLY tier allowed to deviate
+# structurally (it folds data-zone into platform-zone), which is exactly why
+# minimal is non-reportable.
 #
-# NETWORKING — CRITICAL DESIGN POINT:
-#   Cross-zone access is OPEN BY DEFAULT. This base deliberately contains NO
-#   restrictive NetworkPolicies. Agents must be able to *attempt* direct
-#   data-zone access so that enforcement by the protocol layer (MCP/A2A/ANP
-#   capability tokens) can be observed as the experimental variable.
-#   Restrictive policies exist as an OPT-IN Kustomize component at
-#   components/network-policies/ — include it from an overlay only when
-#   "network-policy: on" is the desired experimental condition.
-#   NOTE: NetworkPolicy objects are inert unless the cluster CNI enforces
-#   them — verify CNI enforcement on the target cluster before relying on
-#   the "on" condition (see components/network-policies/kustomization.yaml).
+# NETWORKING — OPEN BY DEFAULT (deliberate): this base contains NO restrictive
+# NetworkPolicies. Agents must be able to *attempt* direct cross-zone (e.g.
+# data-zone) access so that the protocol layer (MCP/A2A/ANP capability tokens)
+# is the enforcement being measured. Restrictive policies are an OPT-IN
+# component (components/network-policies/) added only in the reportable tier —
+# and only on a CNI that enforces NetworkPolicy (Calico/Cilium do; flannel/
+# kubenet do not). See that component for the enforcement-verification recipe.
 #
-# PLACEHOLDERS YOU MUST FILL BEFORE DEPLOYING (grep for REPLACE_ME / TODO):
-#   Images (no registry guessed):
-#     REPLACE_ME/soc-triage-agent:dev          agents/triage.yaml
-#     REPLACE_ME/soc-enrichment-agent:dev      agents/enrichment.yaml
-#     REPLACE_ME/soc-correlation-agent:dev     agents/correlation.yaml
-#     REPLACE_ME/soc-response-agent:dev        agents/response.yaml
-#     REPLACE_ME/soc-reporter-agent:dev        agents/reporter.yaml
-#     REPLACE_ME/inference-runtime:dev         all agents (Ollama or vLLM sidecar)
-#     REPLACE_ME/mcp-siem:dev … etc.           tools/*.yaml (6 images)
-#     REPLACE_ME/trust-anchor:dev              platform/trust-anchor.yaml
-#     REPLACE_ME/service-registry:dev          platform/registry.yaml
-#     REPLACE_ME/workload-generator:dev … etc. experiment/*.yaml (4 images)
-#   Hyperstack specifics (not guessed):
-#     storageClassName for Postgres PVCs       data/*.yaml (TODO, commented)
-#     ingress / external exposure              none created — TODO if needed
-#     node pools / GPU scheduling for sidecars TODO, no nodeSelector set
-#   Secrets:
-#     Postgres credentials                     data/*.yaml (placeholder Secrets)
-#   Resource requests/limits are UNPROFILED GUESSES throughout — tune later.
+# INIT SQL IS SINGLE-SOURCED from docker/initdb/ (the same SQL compose uses), so
+# render/validate with the load restrictor relaxed (files sit outside base/):
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/base
+#
+# PLACEHOLDERS TO FILL BEFORE DEPLOYING (grep REPLACE_ME / TODO):
+#   images.newName below         registry for the two shared images
+#   INFERENCE_ENDPOINT           agents/agent-common-config.yaml (no host-gateway in k8s)
+#   storageClassName             data/postgres-*.yaml (Hyperstack)
+#   Postgres credentials         data/*.yaml + data/endpoints.yaml (dev soc/soc; move to Secret)
+#   image tags/pins              phoenix, postgres, memgraph (…:latest / :16)
+#   resource requests/limits     UNPROFILED GUESSES throughout — tune later
 # =============================================================================
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Do NOT set a global `namespace:` here — resources span 5 namespaces and each
-# declares its own. A global namespace would silently collapse the topology.
+# No global `namespace:` — resources span five namespaces and declare their own.
+# A global namespace would silently collapse the zone topology.
 
 labels:
   - includeSelectors: false
     pairs:
       app.kubernetes.io/part-of: soc-testbed
 
+# The single-build image pattern from compose: two shared images, set in ONE
+# place. Manifests reference the bare names `soc-agent` / `soc-tool`.
+# TODO: replace REPLACE_ME with the target registry; pin the tag.
+images:
+  - name: soc-agent
+    newName: REPLACE_ME/soc-agent
+    newTag: dev
+  - name: soc-tool
+    newName: REPLACE_ME/soc-tool
+    newTag: dev
+
 resources:
   - namespaces.yaml
-  # ---- agent-zone: 5 agents (A2A servers 9101-9105, LLM inference sidecar) ----
+  # ---- agent-zone: 6 A2A agents (9101–9106), shared image, external inference --
+  - agents/agent-common-config.yaml
   - agents/triage.yaml
   - agents/enrichment.yaml
   - agents/correlation.yaml
   - agents/response.yaml
   - agents/reporter.yaml
-  # ---- tool-zone: 6 MCP tool servers over streamable HTTP (7001-7006) ----
+  - agents/verification.yaml
+  # ---- tool-zone: 6 MCP tool servers (7001–7006), shared image, per-tool cmd ---
   - tools/siem.yaml
   - tools/cmdb.yaml
   - tools/threat-intel.yaml
   - tools/runbook.yaml
   - tools/ticketing.yaml
   - tools/containment.yaml
-  # ---- platform-zone: TTP (8443), service registry (8500), otel (4317) ----
-  - platform/trust-anchor.yaml
-  - platform/registry.yaml
-  - platform/otel-collector.yaml
-  # ---- data-zone: operational pg (5432, pgvector), audit pg (5433) ----
-  # (Memgraph is an OFFLINE analysis instrument — intentionally not deployed.)
+  # ---- platform-zone: Phoenix tracing (6006 UI/OTLP-HTTP, 4317 OTLP-gRPC). -----
+  # Trust anchor + service registry are FUTURE (reportable tier): their manifests
+  # remain under platform/ but are intentionally NOT built here.
+  - platform/phoenix.yaml
+  # ---- data-zone: operational pg (5432), audit pg (5433), standing Memgraph ----
+  # Memgraph is STANDING BUT UNWIRED — no agent/tool references it (offline
+  # trust-graph analysis instrument), consistent with the current system.
   - data/postgres-operational.yaml
   - data/postgres-audit.yaml
-  # Single source of truth for data-zone service DNS, per consuming zone.
-  # The minimal overlay rewrites these when it folds data-zone into platform-zone.
+  - data/memgraph.yaml
+  # DB DSNs as cluster DNS; the minimal overlay rewrites these when it folds
+  # data-zone into platform-zone.
   - data/endpoints.yaml
-  # ---- experiment-zone: out-of-band harness, not subject to protocol overhead ----
+  # ---- experiment-zone: out-of-band workload generator (run-once Job) ----------
+  # Attack injector / experiment controller / metrics sink are FUTURE — files
+  # not present yet; add with the reportable tier.
   - experiment/workload-generator.yaml
-  - experiment/attack-injector.yaml
-  - experiment/experiment-controller.yaml
-  - experiment/metrics-sink.yaml
+
+# Schema + seed init, generated from the SAME SQL compose uses (single source of
+# truth). disableNameSuffixHash keeps stable names the StatefulSets mount by.
+configMapGenerator:
+  - name: postgres-operational-init
+    namespace: data-zone
+    files:
+      - ../../docker/initdb/operational/01-init.sql
+      - ../../docker/initdb/operational/02-ground-truth.sql
+  - name: postgres-audit-init
+    namespace: data-zone
+    files:
+      - ../../docker/initdb/audit/01-init.sql
+generatorOptions:
+  disableNameSuffixHash: true

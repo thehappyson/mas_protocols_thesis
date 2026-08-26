@@ -1,0 +1,45 @@
+# platform-zone / phoenix — Arize Phoenix, the tracing backend the agents export
+# to (OTLP/HTTP 6006, OTLP/gRPC 4317; 6006 also serves the UI). This is the real
+# current observability component; the scaffold's otel-collector.yaml is kept as
+# a FUTURE alternative but not built by base.
+# TODO: pin the image tag (…:latest below); traces are ephemeral (no PVC), as in compose.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phoenix
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: phoenix, zone: platform-zone, tier: platform}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: phoenix}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: phoenix, zone: platform-zone, tier: platform}
+    spec:
+      containers:
+        - name: phoenix
+          image: arizephoenix/phoenix:latest
+          ports:
+            - {name: http-otlp, containerPort: 6006}
+            - {name: grpc-otlp, containerPort: 4317}
+          env:
+            - {name: PHOENIX_PORT, value: "6006"}
+            - {name: PHOENIX_GRPC_PORT, value: "4317"}
+            - {name: PHOENIX_ENABLE_AUTH, value: "false"}
+            - {name: PHOENIX_TELEMETRY_ENABLED, value: "false"}
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "1", memory: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phoenix
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: phoenix, zone: platform-zone, tier: platform}
+spec:
+  selector: {app.kubernetes.io/name: phoenix}
+  ports:
+    - {name: http-otlp, port: 6006, targetPort: http-otlp}
+    - {name: grpc-otlp, port: 4317, targetPort: grpc-otlp}

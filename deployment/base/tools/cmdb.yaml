@@ -1,66 +1,40 @@
-# tool-zone / mcp-cmdb — MCP tool server, streamable HTTP on 7002. Internals stubbed.
-# Placeholder image: REPLACE_ME/mcp-cmdb:dev
+# tool-zone / mcp-cmdb — MCP streamable-HTTP server on 7002. Reads operational DB.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mcp-cmdb
   namespace: tool-zone
-  labels:
-    app.kubernetes.io/name: mcp-cmdb
-    zone: tool-zone
-    tier: tool
+  labels: {app.kubernetes.io/name: mcp-cmdb, zone: tool-zone, tier: tool}
 spec:
   replicas: 1
   selector:
-    matchLabels:
-      app.kubernetes.io/name: mcp-cmdb
+    matchLabels: {app.kubernetes.io/name: mcp-cmdb}
   template:
     metadata:
-      labels:
-        app.kubernetes.io/name: mcp-cmdb
-        zone: tool-zone
-        tier: tool
+      labels: {app.kubernetes.io/name: mcp-cmdb, zone: tool-zone, tier: tool}
     spec:
       containers:
         - name: server
-          image: REPLACE_ME/mcp-cmdb:dev
+          image: soc-tool
+          command: ["python", "services/mcp-cmdb/server.py"]
           ports:
-            - name: mcp-http
-              containerPort: 7002
+            - {name: mcp-http, containerPort: 7002}
           env:
-            - name: MCP_TRANSPORT
-              value: streamable-http
-            - name: MCP_LISTEN_PORT
-              value: "7002"
-            - name: TTP_ENDPOINT
-              value: https://trust-anchor.platform-zone.svc.cluster.local:8443
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://otel-collector.platform-zone.svc.cluster.local:4317
+            - {name: MCP_LISTEN_HOST, value: "0.0.0.0"}
+            - {name: MCP_LISTEN_PORT, value: "7002"}
           envFrom:
-            - configMapRef:
-                name: data-endpoints
-          # Unprofiled guesses — tune after first load tests.
+            - configMapRef: {name: data-endpoints}
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 512Mi
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: mcp-cmdb
   namespace: tool-zone
-  labels:
-    app.kubernetes.io/name: mcp-cmdb
-    zone: tool-zone
-    tier: tool
+  labels: {app.kubernetes.io/name: mcp-cmdb, zone: tool-zone, tier: tool}
 spec:
-  selector:
-    app.kubernetes.io/name: mcp-cmdb
+  selector: {app.kubernetes.io/name: mcp-cmdb}
   ports:
-    - name: mcp-http
-      port: 7002
-      targetPort: mcp-http
+    - {name: mcp-http, port: 7002, targetPort: mcp-http}
