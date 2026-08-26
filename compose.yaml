@@ -235,6 +235,33 @@ services:
     labels: {com.soc-testbed.component: "tool", com.soc-testbed.role: "containment"}
     healthcheck: *tool-health
 
+  # ---- Workload zone: out-of-band labeled-alert generator --------------------
+  # NOT an agent and NOT a tool: it writes alerts — and their agent-invisible
+  # ground truth — straight to the operational DB, at a controllable rate/mix.
+  # The SIEM tool's next_alerts then reads them like any other alert. Reuses the
+  # tool image (psycopg2 is already there). Profile-gated so a plain `up` never
+  # starts it; drive a run explicitly, e.g.:
+  #   docker compose run --rm workload-generator run --count 20
+  #   docker compose run --rm workload-generator plan --count 20   # no DB writes
+  workload-generator:
+    image: soc-tool:dev              # built by mcp-siem; reuse it here
+    pull_policy: never
+    networks: [soc]
+    profiles: ["workload"]           # excluded from a plain `docker compose up`
+    restart: "no"
+    environment:
+      OPERATIONAL_DB_URL: *op-db-url
+      WORKLOAD_RATE: "1.0"           # alerts/sec
+      WORKLOAD_ARRIVAL: "steady"     # steady | poisson
+      WORKLOAD_MIX: "benign:0.6,escalate:0.3,campaign:0.1"
+      WORKLOAD_SEED: "1337"          # deterministic: same seed -> same sequence
+      WORKLOAD_COUNT: "20"           # total alerts (or set WORKLOAD_DURATION)
+      WORKLOAD_CAMPAIGN_SIZE: "3"    # stages per multi-stage campaign
+    entrypoint: ["python", "services/workload-generator/generator.py"]
+    command: ["run"]                 # overridable: `... run-args` / `plan --count N`
+    depends_on: {postgres-operational: {condition: service_healthy}}
+    labels: {com.soc-testbed.component: "workload", com.soc-testbed.role: "generator"}
+
   # ---- Agent zone: 6 agents (A2A servers) ------------------------------------
   triage-agent:
     <<: *agent-common
