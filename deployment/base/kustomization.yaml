@@ -21,12 +21,28 @@
 #   kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/base
 #
 # PLACEHOLDERS TO FILL BEFORE DEPLOYING (grep REPLACE_ME / TODO):
-#   images.newName below         registry for the two shared images
 #   INFERENCE_ENDPOINT           agents/agent-common-config.yaml (no host-gateway in k8s)
 #   storageClassName             data/postgres-*.yaml (Hyperstack)
 #   Postgres credentials         data/*.yaml + data/endpoints.yaml (dev soc/soc; move to Secret)
 #   image tags/pins              phoenix, postgres, memgraph (…:latest / :16)
 #   resource requests/limits     UNPROFILED GUESSES throughout — tune later
+#
+# IMAGES: the two shared images are PRIVATE on GitHub Container Registry
+#   ghcr.io/thehappyson/soc-agent  and  ghcr.io/thehappyson/soc-tool
+# pinned by git-commit-sha tag (below) for provenance. Build for the cluster's
+# arch (Hyperstack A100 nodes are linux/amd64) and push — see docker/ build
+# commands. When you rebuild at a new commit, bump the `newTag` in `images:`.
+#
+# IMAGE PULL SECRET (private registry) — a `ghcr-pull` secret is referenced by
+# every agent/tool/generator pod (see `patches:` below). It is NOT committed;
+# create it in each namespace that runs a private image (agent-zone, tool-zone,
+# experiment-zone) with a GitHub PAT scoped `read:packages`:
+#   kubectl create secret docker-registry ghcr-pull \
+#     --docker-server=ghcr.io --docker-username=thehappyson \
+#     --docker-password=<GHCR_PAT_read:packages> --docker-email=<email> \
+#     -n agent-zone
+#   # repeat with -n tool-zone  and  -n experiment-zone
+# (public images — phoenix/postgres/memgraph — need no pull secret.)
 # =============================================================================
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -41,14 +57,54 @@ labels:
 
 # The single-build image pattern from compose: two shared images, set in ONE
 # place. Manifests reference the bare names `soc-agent` / `soc-tool`.
-# TODO: replace REPLACE_ME with the target registry; pin the tag.
+# Tag = git commit sha (provenance: an experiment run is traceable to an image).
+# TODO: bump newTag whenever you rebuild+push at a new commit.
 images:
   - name: soc-agent
-    newName: REPLACE_ME/soc-agent
-    newTag: dev
+    newName: ghcr.io/thehappyson/soc-agent
+    newTag: d7d97ed697cc
   - name: soc-tool
-    newName: REPLACE_ME/soc-tool
-    newTag: dev
+    newName: ghcr.io/thehappyson/soc-tool
+    newTag: d7d97ed697cc
+
+# Private-registry pull secret, attached to every pod that runs a private image
+# (agent + tool Deployments, and the workload-generator Job). The `ghcr-pull`
+# secret is created out-of-band per namespace — see the header TODO; it is not
+# committed. Public-image pods (phoenix/postgres/memgraph) are untouched.
+patches:
+  - target: {kind: Deployment, namespace: agent-zone}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: _ignored_    # target selects the objects; this name is not matched
+      spec:
+        template:
+          spec:
+            imagePullSecrets:
+              - name: ghcr-pull
+  - target: {kind: Deployment, namespace: tool-zone}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: _ignored_
+      spec:
+        template:
+          spec:
+            imagePullSecrets:
+              - name: ghcr-pull
+  - target: {kind: Job, namespace: experiment-zone}
+    patch: |-
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: _ignored_
+      spec:
+        template:
+          spec:
+            imagePullSecrets:
+              - name: ghcr-pull
 
 resources:
   - namespaces.yaml
@@ -67,10 +123,11 @@ resources:
   - tools/runbook.yaml
   - tools/ticketing.yaml
   - tools/containment.yaml
-  # ---- platform-zone: Phoenix tracing (6006 UI/OTLP-HTTP, 4317 OTLP-gRPC). -----
+  # ---- platform-zone: Phoenix tracing (6006) + vLLM inference (8000, A100) -----
   # Trust anchor + service registry are FUTURE (reportable tier): their manifests
   # remain under platform/ but are intentionally NOT built here.
   - platform/phoenix.yaml
+  - platform/vllm.yaml
   # ---- data-zone: operational pg (5432), audit pg (5433), standing Memgraph ----
   # Memgraph is STANDING BUT UNWIRED — no agent/tool references it (offline
   # trust-graph analysis instrument), consistent with the current system.

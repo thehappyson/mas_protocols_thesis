@@ -11,12 +11,13 @@ metadata:
     zone: agent-zone
     tier: agent
 data:
-  # Inference: OpenAI-compatible endpoint. In compose this is host Ollama via
-  # host.docker.internal — there is NO host gateway in-cluster.
-  # TODO(REPLACE_ME): point at an in-cluster dev-inference Service (Ollama/vLLM)
-  # or an ExternalName to a reachable endpoint. Placeholder below does NOT resolve.
-  INFERENCE_ENDPOINT: "http://REPLACE_ME-inference.platform-zone.svc.cluster.local:11434/v1"
-  INFERENCE_MODEL: "llama3.1:8b"
+  # Inference: OpenAI-compatible endpoint — the in-cluster vLLM service (A100).
+  INFERENCE_ENDPOINT: "http://vllm.platform-zone.svc.cluster.local:8000/v1"
+  INFERENCE_MODEL: "Qwen/Qwen3.8-27B"
+  # Qwen3 reasoning toggle. vLLM reads chat_template_kwargs.enable_thinking (the
+  # Ollama `think` flag is ignored by vLLM); soc_agent sends both keys, gated on
+  # this. Default off — reasoning traces would inflate latency/token metrics.
+  INFERENCE_ENABLE_THINKING: "false"
   A2A_LISTEN_HOST: "0.0.0.0"
   # Tracing → Phoenix (OTLP/HTTP on 6006), matching the compose endpoint path.
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://phoenix.platform-zone.svc.cluster.local:6006/v1/traces"

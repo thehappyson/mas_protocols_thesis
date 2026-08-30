@@ -1,0 +1,108 @@
+# platform-zone / vllm — the inference endpoint the agents call (OpenAI-compatible
+# /v1 on 8000). Serves Qwen/Qwen3.8-27B on the Hyperstack A100 (80 GB). Replaces
+# the host-Ollama dev endpoint; agents point at it via INFERENCE_ENDPOINT.
+#
+# GPU SCHEDULING (cluster-specific — FILL IN): requesting `nvidia.com/gpu: 1` is
+# the primary signal and usually schedules onto the GPU node on its own. If the
+# GPU pool is TAINTED (common on managed clusters), add a matching toleration;
+# if it needs a label, add a nodeSelector. Find them with:
+#   kubectl get nodes -L nvidia.com/gpu.present --show-labels
+#   kubectl describe node <gpu-node> | grep -i taint
+# and uncomment/adjust the placeholders below. Some clusters also need
+# `runtimeClassName: nvidia`.
+#
+# IMAGE (FILL IN): pin vllm/vllm-openai to a version new enough to support
+# Qwen3.8-27B (this model postdates a plain :latest guess). `--trust-remote-code`
+# is set because the architecture may ship a custom modeling file.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-hf-cache
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: vllm, zone: platform-zone, tier: platform}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # TODO(Hyperstack): storageClassName left unset → default (local-path). The
+  # ~54 GB of weights persist here so restarts don't re-download. Size with head-room.
+  resources:
+    requests: {storage: 120Gi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: vllm, zone: platform-zone, tier: platform}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}          # one GPU: never run two pods at once
+  selector:
+    matchLabels: {app.kubernetes.io/name: vllm}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: vllm, zone: platform-zone, tier: platform}
+    spec:
+      # runtimeClassName: nvidia       # TODO: uncomment if the cluster requires it
+      # nodeSelector:                  # TODO: set if the GPU node needs a label
+      #   nvidia.com/gpu.present: "true"
+      # tolerations:                   # TODO: add if the GPU pool is tainted
+      #   - key: nvidia.com/gpu
+      #     operator: Exists
+      #     effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest   # TODO: PIN a version that supports Qwen3.8-27B
+          args:
+            - --model=Qwen/Qwen3.8-27B
+            - --served-model-name=Qwen/Qwen3.8-27B
+            - --host=0.0.0.0
+            - --port=8000
+            - --gpu-memory-utilization=0.90
+            - --max-model-len=32768        # cap KV-cache footprint; raise if needed
+            - --reasoning-parser=qwen3     # split <think> into reasoning_content
+            - --trust-remote-code
+          ports:
+            - {name: http, containerPort: 8000}
+          env:
+            - {name: HF_HOME, value: /hf-cache}
+            # Qwen3 is ungated — no token needed. For a GATED model, create a
+            # Secret and uncomment:
+            # - name: HUGGING_FACE_HUB_TOKEN
+            #   valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+          volumeMounts:
+            - {name: hf-cache, mountPath: /hf-cache}
+            - {name: dshm, mountPath: /dev/shm}   # vLLM needs a large /dev/shm
+          resources:
+            requests: {cpu: "4", memory: 32Gi}
+            limits:
+              cpu: "8"
+              memory: 64Gi
+              nvidia.com/gpu: 1          # the scheduling signal for the A100
+          # Model download + load takes minutes; give startup a wide window
+          # before liveness can kill the pod.
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 20
+            failureThreshold: 60         # up to ~20 min to become ready
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim: {claimName: vllm-hf-cache}
+        - name: dshm
+          emptyDir: {medium: Memory, sizeLimit: 8Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: vllm, zone: platform-zone, tier: platform}
+spec:
+  selector: {app.kubernetes.io/name: vllm}
+  ports:
+    - {name: http, port: 8000, targetPort: http}

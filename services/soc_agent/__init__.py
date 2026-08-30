@@ -114,10 +114,18 @@ MAX_TOOL_ITERATIONS = int(os.environ.get("MAX_TOOL_ITERATIONS", "5"))
 # reasoning model; never for reportable runs.
 _max_tok = os.environ.get("INFERENCE_MAX_TOKENS")
 INFERENCE_MAX_TOKENS = int(_max_tok) if _max_tok else None
-# Toggle the reasoning model on or off to use as instruct model
-# Reasoning behaviour can lead to uncapped runs and unwanted behaviour,
-# which is better controlled by instruct models
-INFERENCE_THINK = {"think": False}
+# Toggle the reasoning model on or off. Reasoning behaviour can lead to uncapped
+# runs and inflates latency/token metrics, so default OFF. Different backends use
+# different keys, so we send BOTH and each backend ignores the one it does not
+# know: Ollama reads `think`; vLLM (Qwen3 et al.) reads
+# chat_template_kwargs.enable_thinking. Config-driven via INFERENCE_ENABLE_THINKING.
+INFERENCE_ENABLE_THINKING = (
+    os.environ.get("INFERENCE_ENABLE_THINKING", "false").lower() == "true"
+)
+INFERENCE_THINK = {
+    "think": INFERENCE_ENABLE_THINKING,  # Ollama-native
+    "chat_template_kwargs": {"enable_thinking": INFERENCE_ENABLE_THINKING},  # vLLM/Qwen3
+}
 
 # --- Observability (Arize Phoenix over OpenTelemetry) ------------------------
 # Single tracing path: the one place LLM calls happen is the AsyncOpenAI client,

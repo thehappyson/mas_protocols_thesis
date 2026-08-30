@@ -17,6 +17,30 @@ spec:
       labels: {app.kubernetes.io/name: workload-generator, zone: experiment-zone, tier: experiment}
     spec:
       restartPolicy: Never
+      # The operational DB is a StatefulSet behind a headless Service; a headless
+      # Service with no READY endpoints returns NXDOMAIN, so a Job that fires at
+      # apply-time (before Postgres is up) dies with "Name or service not known".
+      # Block on the DB becoming reachable first — this also survives DNS not yet
+      # resolving, since the loop retries until the endpoint is ready.
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16
+          command:
+            - sh
+            - -c
+            - |
+              echo "waiting for operational DB (OPERATIONAL_DB_URL)..."
+              for i in $(seq 1 60); do
+                pg_isready -d "$OPERATIONAL_DB_URL" && exit 0
+                sleep 2
+              done
+              echo "operational DB not ready after ~120s" >&2
+              exit 1
+          envFrom:
+            - configMapRef: {name: data-endpoints}   # same DSN the overlay rewrites
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 200m, memory: 128Mi}
       containers:
         - name: generator
           image: soc-tool     # same shared tool image; psycopg2 already present
