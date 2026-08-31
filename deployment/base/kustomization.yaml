@@ -62,7 +62,7 @@ labels:
 images:
   - name: soc-agent
     newName: ghcr.io/thehappyson/soc-agent
-    newTag: d7d97ed697cc
+    newTag: 009fc25fda75
   - name: soc-tool
     newName: ghcr.io/thehappyson/soc-tool
     newTag: d7d97ed697cc

@@ -2,31 +2,25 @@
 # /v1 on 8000). Serves Qwen/Qwen3.8-27B on the Hyperstack A100 (80 GB). Replaces
 # the host-Ollama dev endpoint; agents point at it via INFERENCE_ENDPOINT.
 #
-# GPU SCHEDULING (cluster-specific — FILL IN): requesting `nvidia.com/gpu: 1` is
-# the primary signal and usually schedules onto the GPU node on its own. If the
-# GPU pool is TAINTED (common on managed clusters), add a matching toleration;
-# if it needs a label, add a nodeSelector. Find them with:
-#   kubectl get nodes -L nvidia.com/gpu.present --show-labels
-#   kubectl describe node <gpu-node> | grep -i taint
-# and uncomment/adjust the placeholders below. Some clusters also need
-# `runtimeClassName: nvidia`.
+# MODEL STORAGE — streamed from Hyperstack S3 object storage (CANADA-1) via
+# vLLM's Run:ai Model Streamer, so weights survive cluster deletion (the cluster
+# itself is torn down when idle) and load fast intra-region. Seed the bucket once
+# with deployment/seed-model-job.yaml. NOTE: the ~54 GB is still transferred from
+# the bucket on each fresh cluster (Hyperstack has no supported volume-reattach) —
+# it's just fast in-region instead of over the WAN.
 #
-# IMAGE (FILL IN): pin vllm/vllm-openai to a version new enough to support
-# Qwen3.8-27B (this model postdates a plain :latest guess). `--trust-remote-code`
-# is set because the architecture may ship a custom modeling file.
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: vllm-hf-cache
-  namespace: platform-zone
-  labels: {app.kubernetes.io/name: vllm, zone: platform-zone, tier: platform}
-spec:
-  accessModes: ["ReadWriteOnce"]
-  # TODO(Hyperstack): storageClassName left unset → default (local-path). The
-  # ~54 GB of weights persist here so restarts don't re-download. Size with head-room.
-  resources:
-    requests: {storage: 120Gi}
----
+# GPU SCHEDULING (cluster-specific): `nvidia.com/gpu: 1` is the scheduling signal;
+# `runtimeClassName: nvidia` is set. If the GPU pool is tainted/labelled, add the
+# toleration/nodeSelector placeholders below (find via `kubectl describe node`).
+#
+# IMAGE: vllm/vllm-openai pinned to a nightly recent enough for Qwen3.8-27B.
+# --trust-remote-code is set in case the architecture ships a custom modeling file.
+#
+# S3 CREDS (create out-of-band, NOT committed) — a `vllm-s3-creds` Secret with the
+# Hyperstack Object Storage access key/secret (Console → Object Storage → Access Keys):
+#   kubectl -n platform-zone create secret generic vllm-s3-creds \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,35 +36,52 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: vllm, zone: platform-zone, tier: platform}
     spec:
-      # runtimeClassName: nvidia       # TODO: uncomment if the cluster requires it
+      # The Service is named `vllm`, so k8s injects VLLM_PORT=tcp://<ip>:8000 as a
+      # service-discovery env var — which collides with vLLM's OWN VLLM_PORT config
+      # and crashes it. Disable those Docker-link env vars (vLLM uses explicit
+      # endpoints, so it needs none of them).
+      enableServiceLinks: false
+      runtimeClassName: nvidia
       # nodeSelector:                  # TODO: set if the GPU node needs a label
       #   nvidia.com/gpu.present: "true"
       # tolerations:                   # TODO: add if the GPU pool is tainted
-      #   - key: nvidia.com/gpu
-      #     operator: Exists
-      #     effect: NoSchedule
+      #   - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
       containers:
         - name: vllm
-          image: vllm/vllm-openai:latest   # TODO: PIN a version that supports Qwen3.8-27B
+          image: vllm/vllm-openai:v0.28.0-x86_64-ubuntu2404
+          # Ensure the Run:ai S3 streamer is present (image may not bundle the S3
+          # extra), then serve directly from the bucket — no local weight copy.
+          command: ["/bin/bash", "-lc"]
           args:
-            - --model=Qwen/Qwen3.8-27B
-            - --served-model-name=Qwen/Qwen3.8-27B
-            - --host=0.0.0.0
-            - --port=8000
-            - --gpu-memory-utilization=0.90
-            - --max-model-len=32768        # cap KV-cache footprint; raise if needed
-            - --reasoning-parser=qwen3     # split <think> into reasoning_content
-            - --trust-remote-code
+            - |
+              set -euo pipefail
+              python -c 'import runai_model_streamer, runai_model_streamer_s3' 2>/dev/null \
+                || pip install --no-cache-dir runai-model-streamer runai-model-streamer-s3
+              exec vllm serve s3://model-storage/Qwen3.8-27B \
+                --served-model-name Qwen/Qwen3.8-27B \
+                --load-format runai_streamer \
+                --host 0.0.0.0 --port 8000 \
+                --gpu-memory-utilization 0.90 \
+                --max-model-len 32768 \
+                --reasoning-parser qwen3 \
+                --trust-remote-code
           ports:
             - {name: http, containerPort: 8000}
           env:
-            - {name: HF_HOME, value: /hf-cache}
-            # Qwen3 is ungated — no token needed. For a GATED model, create a
-            # Secret and uncomment:
-            # - name: HUGGING_FACE_HUB_TOKEN
-            #   valueFrom: {secretKeyRef: {name: hf-token, key: token}}
+            # Hyperstack Object Storage (S3-compatible), CANADA-1.
+            - {name: AWS_ENDPOINT_URL, value: "https://ca1.obj.nexgencloud.io"}
+            - {name: AWS_REGION, value: "canada-1"}
+            # Hyperstack/MinIO-style endpoints need PATH-style addressing (default
+            # is virtual-hosted, which fails here). TWO clients read the bucket and
+            # each has its OWN knob:
+            #   boto3 (config/tokenizer reads) -> AWS_S3_ADDRESSING_STYLE
+            #   Run:ai C++ streamer (weights)  -> RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING
+            - {name: AWS_S3_ADDRESSING_STYLE, value: "path"}
+            - {name: RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING, value: "0"}
+            - {name: HF_HOME, value: /tmp/hf}   # incidental cache only (not weights)
+          envFrom:
+            - secretRef: {name: vllm-s3-creds}  # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
           volumeMounts:
-            - {name: hf-cache, mountPath: /hf-cache}
             - {name: dshm, mountPath: /dev/shm}   # vLLM needs a large /dev/shm
           resources:
             requests: {cpu: "4", memory: 32Gi}
@@ -78,8 +89,7 @@ spec:
               cpu: "8"
               memory: 64Gi
               nvidia.com/gpu: 1          # the scheduling signal for the A100
-          # Model download + load takes minutes; give startup a wide window
-          # before liveness can kill the pod.
+          # Stream + load takes minutes; wide startup window before liveness bites.
           startupProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 20
@@ -91,8 +101,6 @@ spec:
             httpGet: {path: /health, port: http}
             periodSeconds: 30
       volumes:
-        - name: hf-cache
-          persistentVolumeClaim: {claimName: vllm-hf-cache}
         - name: dshm
           emptyDir: {medium: Memory, sizeLimit: 8Gi}
 ---

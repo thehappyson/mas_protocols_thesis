@@ -1,0 +1,85 @@
+# One-time model seed: download Qwen/Qwen3.8-27B from HuggingFace and upload it to
+# the Hyperstack S3 bucket `model-storage` (CANADA-1), so vLLM can stream it from
+# there on every future cluster (see deployment/base/platform/vllm.yaml).
+#
+# This is NOT part of the kustomize base — run it once, manually, then delete it.
+# Requires the `vllm-s3-creds` Secret to exist in platform-zone first:
+#   kubectl -n platform-zone create secret generic vllm-s3-creds \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> \
+#     --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+#
+# Run:
+#   kubectl apply -f deployment/seed-model-job.yaml
+#   kubectl -n platform-zone logs -f job/seed-model
+# When it prints "seed complete", clean up:
+#   kubectl -n platform-zone delete -f deployment/seed-model-job.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seed-scratch
+  namespace: platform-zone
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # csi-hyperstack default class. Needs room for the full ~54 GB download.
+  resources:
+    requests: {storage: 120Gi}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed-model
+  namespace: platform-zone
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: python:3.12-slim
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /scratch/hf /scratch/tmp        # all big scratch on the PVC
+              df -h /scratch
+              apt-get update && apt-get install -y --no-install-recommends curl ca-certificates
+              pip install --no-cache-dir "huggingface_hub[hf_transfer]"
+              export HF_HUB_ENABLE_HF_TRANSFER=1
+              echo "== downloading Qwen/Qwen3.8-27B from HuggingFace =="
+              hf download Qwen/Qwen3.8-27B --local-dir /scratch/Qwen3.8-27B
+              echo "== local contents (real files should total ~54 GB; NO symlinks) =="
+              ls -la /scratch/Qwen3.8-27B
+              du -sh /scratch/Qwen3.8-27B
+              echo "symlinks (must be empty):"; find /scratch/Qwen3.8-27B -maxdepth 1 -type l
+              test -f /scratch/Qwen3.8-27B/config.json || { echo "ERROR: no config.json downloaded" >&2; exit 1; }
+              echo "== installing mc and uploading to s3://model-storage/Qwen3.8-27B =="
+              curl -sSLo /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+              chmod +x /usr/local/bin/mc
+              mc alias set hs "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+              # --exclude the HF metadata dir; mc does NOT follow symlinks, so if the
+              # download produced symlinks this upload would silently do nothing —
+              # the verify step below fails loudly in that case.
+              mc mirror --overwrite --exclude ".cache/**" /scratch/Qwen3.8-27B hs/model-storage/Qwen3.8-27B
+              echo "== verify remote is non-empty =="
+              mc ls --recursive hs/model-storage/Qwen3.8-27B | tee /scratch/remote.txt
+              test -s /scratch/remote.txt || { echo "ERROR: bucket empty after mirror (symlinks or wrong path?)" >&2; exit 1; }
+              echo "seed complete"
+          env:
+            - {name: AWS_ENDPOINT_URL, value: "https://ca1.obj.nexgencloud.io"}
+            # Keep the HF cache + temp on the 120Gi PVC, NOT the node's small
+            # ephemeral disk — a 54 GB download to /root/.cache evicts the pod
+            # (DiskPressure). This is what made the seed "time out".
+            - {name: HF_HOME, value: /scratch/hf}
+            - {name: HF_HUB_CACHE, value: /scratch/hf/hub}
+            - {name: TMPDIR, value: /scratch/tmp}
+          envFrom:
+            - secretRef: {name: vllm-s3-creds}
+          volumeMounts:
+            - {name: scratch, mountPath: /scratch}
+          resources:
+            requests: {cpu: "2", memory: 4Gi}
+            limits: {cpu: "4", memory: 8Gi}
+      volumes:
+        - name: scratch
+          persistentVolumeClaim: {claimName: seed-scratch}
