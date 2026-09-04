@@ -25,9 +25,10 @@
 
 CREATE TABLE IF NOT EXISTS alert_ground_truth (
     alert_id         text PRIMARY KEY REFERENCES alerts (id) ON DELETE CASCADE,
-    true_class       text NOT NULL,      -- 'benign' | 'escalate' | 'campaign'
-    campaign_id      text,               -- set when true_class = 'campaign'
-    stage            integer,            -- campaign stage ordinal (1..N), else NULL
+    true_class       text NOT NULL,      -- disposition: 'benign' | 'escalate'
+    attack_type      text,               -- raw dataset Label (NULL for benign / synthetic)
+    campaign_id      text,               -- groups one attack instance (date:label); else NULL
+    stage            integer,            -- optional phase within a multi-stage attack, else NULL
     indicator        text,              -- the linked IOC (see iocs table)
     indicator_verdict text,             -- the IOC's seed verdict (the label's basis)
     target_asset     text,              -- the linked CMDB asset id

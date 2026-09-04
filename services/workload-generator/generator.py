@@ -410,6 +410,7 @@ _GROUND_TRUTH_DDL = """
 CREATE TABLE IF NOT EXISTS alert_ground_truth (
     alert_id          text PRIMARY KEY REFERENCES alerts (id) ON DELETE CASCADE,
     true_class        text NOT NULL,
+    attack_type       text,
     campaign_id       text,
     stage             integer,
     indicator         text,

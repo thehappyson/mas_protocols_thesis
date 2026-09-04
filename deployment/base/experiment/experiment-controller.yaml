@@ -1,6 +1,5 @@
 # experiment-zone / experiment-controller — orchestrates runs (start/stop,
 # condition toggles, run metadata), HTTP API on 8700. Out-of-band/god-mode.
-# Placeholder image: REPLACE_ME/experiment-controller:dev
 apiVersion: apps/v1
 kind: Deployment
 metadata:

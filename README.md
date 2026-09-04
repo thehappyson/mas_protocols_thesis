@@ -320,7 +320,34 @@ overlay come later).
 ```bash
 kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/base
 kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/minimal
+kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/reportable
 ```
+
+Overlays: **`minimal`** (4-zone dev, no policies) and **`reportable`** (5-zone +
+NetworkPolicies on); `scaled` comes later. Full per-cluster deploy steps are in
+`deployment/CLUSTER_BOOTSTRAP_minimal.md` / `_reportable.md`.
+
+### Building & pushing the two images (for the cluster)
+
+The agents and tools run from two **private** GHCR images built from this repo.
+Rebuild + push whenever the code they bake in changes (agent = `services/soc_agent`
++ agents/workflows; tool = `services/mcp-*` + `mcp_db.py` + generator). **Build for
+`linux/amd64`** — a native build on an arm64 Mac won't run on the cluster.
+
+```bash
+# authenticate (GitHub PAT with write:packages)
+echo "$GHCR_PAT" | docker login ghcr.io -u thehappyson --password-stdin
+
+# tag by commit SHA for provenance, build amd64, push
+TAG=$(git rev-parse --short=12 HEAD); echo "TAG=$TAG"
+docker buildx build --platform linux/amd64 -f docker/Dockerfile.agent -t ghcr.io/thehappyson/soc-agent:$TAG --push .
+docker buildx build --platform linux/amd64 -f docker/Dockerfile.tool  -t ghcr.io/thehappyson/soc-tool:$TAG  --push .
+```
+
+Then bump both `newTag`s in `deployment/base/kustomization.yaml` to `$TAG`, re-apply
+the overlay, and `kubectl -n agent-zone rollout restart deployment` (and
+`-n tool-zone` if the tool image changed). Commit before building so the SHA tag
+matches the code in the image.
 
 > `kubectl apply --dry-run=client` needs a reachable API server for discovery, so it
 > can't validate fully offline; the render above plus structural checks are the offline

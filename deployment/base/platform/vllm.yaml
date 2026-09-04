@@ -64,6 +64,8 @@ spec:
                 --gpu-memory-utilization 0.90 \
                 --max-model-len 32768 \
                 --reasoning-parser qwen3 \
+                --enable-auto-tool-choice \
+                --tool-call-parser hermes \
                 --trust-remote-code
           ports:
             - {name: http, containerPort: 8000}

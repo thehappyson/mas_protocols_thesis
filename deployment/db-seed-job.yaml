@@ -1,0 +1,74 @@
+# One-time operational-DB seed loader. Pulls the bulk seed_*.sql that
+# scripts/stage_dbs.py generated + uploaded to the model bucket subfolder
+# (s3://model-storage/db-seed/) and psql-loads it into postgres-operational.
+#
+# Runs AFTER the schema exists (01-init.sql ran as the initdb ConfigMap when
+# Postgres first started) and after the DB is reachable. Not part of the
+# kustomize base — apply it manually once per fresh DB, then delete it. Requires
+# the `vllm-s3-creds` Secret (reused for object-storage access).
+#
+# NAMESPACE: this targets where postgres-operational lives. In the `minimal`
+# overlay that's platform-zone (data-zone is folded in). Change ns + the DSN host
+# if you deploy a different overlay.
+#
+# Run:
+#   kubectl apply -f deployment/db-seed-job.yaml
+#   kubectl -n platform-zone logs -f job/db-seed
+#   kubectl -n platform-zone delete -f deployment/db-seed-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-seed
+  namespace: platform-zone
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        # 1) block until the operational DB accepts connections
+        - name: wait-for-db
+          image: postgres:16
+          command: ["sh", "-c"]
+          args:
+            - 'for i in $(seq 1 60); do pg_isready -d "$OPERATIONAL_DB_URL" && exit 0; sleep 2; done; echo "db not ready" >&2; exit 1'
+          env:
+            - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational.platform-zone.svc.cluster.local:5432/soc_operational"}
+        # 2) download the seed from the bucket subfolder into a shared dir
+        - name: fetch-seed
+          image: minio/mc
+          command: ["sh", "-c"]
+          args:
+            - 'mc alias set hs "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" && mc cp --recursive hs/model-storage/db-seed/ /seed/ && ls -la /seed'
+          env:
+            - {name: AWS_ENDPOINT_URL, value: "https://ca1.obj.nexgencloud.io"}
+          envFrom:
+            - secretRef: {name: vllm-s3-creds}   # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+          volumeMounts:
+            - {name: seed, mountPath: /seed}
+      containers:
+        # 3) load the SQL — ORDER MATTERS: alert_ground_truth references alerts(id),
+        #    so alerts must load before ground_truth. iocs/assets are independent.
+        - name: loader
+          image: postgres:16
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              for f in iocs assets alerts ground_truth; do
+                echo "== loading seed_$f.sql =="
+                psql "$OPERATIONAL_DB_URL" -v ON_ERROR_STOP=1 -f "/seed/seed_$f.sql"
+              done
+              psql "$OPERATIONAL_DB_URL" -c "SELECT
+                (SELECT count(*) FROM alerts)             AS alerts,
+                (SELECT count(*) FROM iocs)               AS iocs,
+                (SELECT count(*) FROM assets)             AS assets,
+                (SELECT count(*) FROM alert_ground_truth) AS ground_truth;"
+              echo "db-seed complete"
+          env:
+            - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational.platform-zone.svc.cluster.local:5432/soc_operational"}
+          volumeMounts:
+            - {name: seed, mountPath: /seed}
+      volumes:
+        - name: seed
+          emptyDir: {}

@@ -1,0 +1,40 @@
+# =============================================================================
+# soc-testbed — REPORTABLE overlay (the comparable 5-zone tier, policies ON).
+#
+# This is the tier measurements are reported from. It is the FULL base topology
+# unchanged — all five zones kept distinct (agent, tool, platform, data,
+# experiment), every workload at replica 1 — PLUS the restrictive NetworkPolicy
+# component turned on. Unlike `minimal`, it does NOT fold data-zone into
+# platform-zone: keeping the zones separate is what makes results comparable
+# across configurations (and is why minimal is non-reportable).
+#
+# NETWORK POLICY = ON. The components/network-policies component closes the
+# direct agent→data-zone path at the network layer, so the experimental
+# condition is "infrastructure gates cross-zone reach" (vs base/minimal, where
+# nothing does and only the protocol layer can). Egress stays open everywhere
+# (DNS + outbound to vLLM/S3 keep working); only INGRESS is restricted per zone:
+#   data-zone   ← tool-zone, experiment-zone, data-zone           (NOT agent-zone)
+#   tool-zone   ← agent-zone, experiment-zone, tool-zone
+#   agent-zone  ← agent-zone, experiment-zone
+#   platform    ← every zone (shared infra: vLLM 8000, Phoenix 6006)
+#   experiment  ← unrestricted (out-of-band / god-mode)
+#
+# REQUIRES a CNI that ENFORCES NetworkPolicy. The Hyperstack cluster runs Calico
+# (calico-system present) → enforced. Verify after apply (see the runbook): from
+# an agent pod, `nc -zv postgres-operational.data-zone…:5432` must TIME OUT.
+#
+# `scaled` (later) builds on THIS overlay and only bumps replica counts.
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/network-policies
+
+labels:
+  - includeSelectors: false
+    pairs:
+      soc-testbed.io/config-tier: reportable

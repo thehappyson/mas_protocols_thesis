@@ -94,17 +94,6 @@ patches:
           spec:
             imagePullSecrets:
               - name: ghcr-pull
-  - target: {kind: Job, namespace: experiment-zone}
-    patch: |-
-      apiVersion: batch/v1
-      kind: Job
-      metadata:
-        name: _ignored_
-      spec:
-        template:
-          spec:
-            imagePullSecrets:
-              - name: ghcr-pull
 
 resources:
   - namespaces.yaml
@@ -137,10 +126,11 @@ resources:
   # DB DSNs as cluster DNS; the minimal overlay rewrites these when it folds
   # data-zone into platform-zone.
   - data/endpoints.yaml
-  # ---- experiment-zone: out-of-band workload generator (run-once Job) ----------
-  # Attack injector / experiment controller / metrics sink are FUTURE — files
-  # not present yet; add with the reportable tier.
-  - experiment/workload-generator.yaml
+  # ---- experiment-zone: intentionally EMPTY of workloads now. The synthetic
+  # workload-generator was dropped in favour of driving the pipeline over the
+  # REAL staged dataset (scripts/stage_dbs.py → wl.jsonl → scripts/run_workload.py).
+  # The manifest is kept at experiment/workload-generator.yaml for reference but
+  # is no longer built. (Attack injector / controller / metrics sink still FUTURE.)
 
 # Schema + seed init, generated from the SAME SQL compose uses (single source of
 # truth). disableNameSuffixHash keeps stable names the StatefulSets mount by.
