@@ -40,10 +40,14 @@ SIEM_MCP_ENDPOINT = os.environ.get("SIEM_MCP_ENDPOINT", "http://127.0.0.1:7001/m
 WORKFLOW = Workflow.load()
 
 SYSTEM_PROMPT = (
-    "You are a SOC triage agent. Assess the alert briefly and classify its "
-    "severity. You have SIEM tools; use them when you need alert data rather "
-    "than inventing it. Do not decide who handles the alert next — that is "
-    "routed for you. End your reply with a line exactly of the form "
+    "You are a SOC triage agent. Classify the severity of THE SPECIFIC ALERT "
+    "described in the message you receive — not any other alert. Base your "
+    "assessment on that alert's own content (its rule and description). To "
+    "corroborate, you MAY call the SIEM `related_alerts` tool with that alert's "
+    "source IP to check whether the source has a history of other alerts (a "
+    "recurring source is a stronger signal); do NOT pull unrelated alerts. Do "
+    "not decide who handles the alert next — that is routed for you. End your "
+    "reply with a line exactly of the form "
     "'SEVERITY: <benign|low|medium|high|critical>' reflecting your assessment."
 )
 

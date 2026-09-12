@@ -52,24 +52,30 @@ server = MCPServer(
     instructions="Synthetic SOC SIEM. Provides access to security alerts for triage.",
 )
 
-def _fetch_alerts(since: str | None, limit: int) -> list[dict[str, Any]]:
+def _fetch_alerts(since: str | None, limit: int,
+                  source_ip: str | None = None) -> list[dict[str, Any]]:
     """DATA-ACCESS SEAM (read) — backed by the operational `alerts` table.
 
-    Return shape is unchanged from the stub: a list of
-    {id, timestamp, source_ip, dest_ip, rule_name, description} dicts (no
-    severity key, matching the prior canned alert). Now backed by real storage:
-    `since` filters by timestamp (was ignored in the stub) and `limit` bounds
-    the rows, newest first.
+    Return shape is a list of {id, timestamp, source_ip, dest_ip, rule_name,
+    description} dicts (no severity key). Newest first. `since` filters by
+    timestamp, `source_ip` filters to one source (corroboration lookup), and
+    `limit` bounds the rows.
     """
     sql = (
         "SELECT id, "
         "to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS timestamp, "
         "source_ip, dest_ip, rule_name, description FROM alerts"
     )
+    clauses: list[str] = []
     params: list[Any] = []
     if since:
-        sql += " WHERE ts > %s"
+        clauses.append("ts > %s")
         params.append(since)
+    if source_ip:
+        clauses.append("source_ip = %s")
+        params.append(source_ip)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY ts DESC"
     if limit is not None and limit >= 0:
         sql += " LIMIT %s"
@@ -91,6 +97,23 @@ def next_alerts(since: str | None = None, limit: int = 10) -> list[dict[str, Any
         limit: Maximum number of alerts to return.
     """
     return _fetch_alerts(since, limit)
+
+
+@server.tool(
+    description=(
+        "Look up prior alerts from a specific source IP, newest first — to "
+        "corroborate whether a source has a history. Returns a list of alert "
+        "objects; an empty list means no other alerts from that source."
+    )
+)
+def related_alerts(source_ip: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Return alerts sharing `source_ip` (newest first), for corroboration.
+
+    Args:
+        source_ip: the source IP to look up a history for.
+        limit: maximum number of alerts to return.
+    """
+    return _fetch_alerts(None, limit, source_ip=source_ip)
 
 
 if __name__ == "__main__":
