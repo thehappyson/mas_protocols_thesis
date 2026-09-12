@@ -121,18 +121,26 @@ curl -s localhost:8000/v1/models     # should list Qwen/Qwen3.8-27B
 ```
 
 ### 7. Load the real dataset + drive the pipeline
-The pipeline is driven over the **real CSE-CIC-IDS2018 dataset** (the synthetic
-workload-generator was dropped). Build the seed + driving manifest, upload the
-seed, and load it into Postgres (minimal keeps the DB in **platform-zone**, and
-`db-seed-job.yaml` already targets platform-zone):
+The pipeline is driven over the **real SIEVE log dataset** (`raw_data/SIEVE_*.csv`;
+the synthetic workload-generator was dropped). Each row is a pre-labelled log event
+whose *category* is the ground truth; `stage_dbs.py` maps it to an alert, rewrites the
+victim to a synthetic CMDB asset (universal hit) and ~40% of attack sources to a seeded
+IOC (partial hit), so the escalate/benign branch is driven by reasoning, not one lookup.
+Build the seed + driving manifest, upload the seed, and load it into Postgres (minimal
+keeps the DB in **platform-zone**, where `vllm-s3-creds` already exists). The loader is
+a kustomize overlay that targets the right namespace — no `sed`:
 ```bash
+export AWS_ACCESS_KEY_ID=<key>; export AWS_SECRET_ACCESS_KEY=<secret>
 /opt/miniconda3/envs/masterarbeit/bin/python scripts/stage_dbs.py --upload   # → raw_data/staged/seed_*.sql + wl.jsonl, uploads seed
-kubectl apply -f deployment/db-seed-job.yaml
+kubectl apply -k deployment/db-seed/minimal
 kubectl -n platform-zone logs -f job/db-seed        # -> "db-seed complete"
-kubectl -n platform-zone delete job db-seed
+kubectl delete -k deployment/db-seed/minimal
 ```
-Drive a mixed sample through the live pipeline (needs vLLM Ready; the real manifest
-has ~12k lines, so sample both classes rather than driving all):
+> Full SIEVE is ~600k alerts (`seed_alerts.sql` ~140 MB). For a smaller SIEM store,
+> `stage_dbs.py --limit N` stages a deterministic N-alert sample.
+
+Drive a mixed sample through the live pipeline (needs vLLM Ready; the manifest has
+~600k lines, so sample both classes rather than driving all):
 ```bash
 kubectl -n agent-zone port-forward svc/triage-agent 9101:9101 &
 grep '"true_class": "escalate"' raw_data/staged/wl.jsonl | head -10  > /tmp/mix.jsonl
@@ -151,6 +159,12 @@ Traces: `kubectl -n platform-zone port-forward svc/phoenix 6006:6006`. Inspect t
 - **db-seed can't reach Postgres**: check `postgres-operational` is Running in
   platform-zone (all 4 namespaces created? DB pod scheduled?). `run_workload` gets
   no response → vLLM not Ready or `raw_data/staged/wl.jsonl` empty.
+- **S3 upload `MissingContentLength`**: boto3/aws-cli ≥ 1.36 send uploads as
+  `aws-chunked` with a trailing checksum by default (no `Content-Length`), which
+  Hyperstack rejects. `stage_dbs.py` sets `request_checksum_calculation="when_required"`
+  to force a plain body; for the `aws` CLI, export `AWS_REQUEST_CHECKSUM_CALCULATION=when_required`
+  (and `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required`). Large files also go as 16 MB
+  multipart parts to avoid a dropped single PUT.
 - **vLLM + S3 (Run:ai streamer)**: MinIO-style endpoint needs PATH-style addressing —
   both `AWS_S3_ADDRESSING_STYLE=path` (boto3) and
   `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0` (C++ streamer) are set in `vllm.yaml`.

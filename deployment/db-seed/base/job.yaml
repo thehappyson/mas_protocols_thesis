@@ -2,24 +2,26 @@
 # scripts/stage_dbs.py generated + uploaded to the model bucket subfolder
 # (s3://model-storage/db-seed/) and psql-loads it into postgres-operational.
 #
-# Runs AFTER the schema exists (01-init.sql ran as the initdb ConfigMap when
-# Postgres first started) and after the DB is reachable. Not part of the
-# kustomize base — apply it manually once per fresh DB, then delete it. Requires
-# the `vllm-s3-creds` Secret (reused for object-storage access).
+# NAMESPACE-PORTABLE: this manifest declares NO namespace and uses the SHORT DB
+# host `postgres-operational` (same-namespace DNS). The kustomize overlays under
+# ../minimal and ../reportable set the namespace to wherever Postgres lives
+# (platform-zone for minimal, data-zone for reportable) — so there is no `sed`.
 #
-# NAMESPACE: this targets where postgres-operational lives. In the `minimal`
-# overlay that's platform-zone (data-zone is folded in). Change ns + the DSN host
-# if you deploy a different overlay.
+# PREREQS in that namespace:
+#   * postgres-operational is Running and its schema exists (the initdb ConfigMap
+#     ran on first start);
+#   * a `vllm-s3-creds` Secret (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY) — the
+#     SAME object-storage creds used elsewhere, created out-of-band because it
+#     holds credentials (never committed, so not overlay-managed).
 #
-# Run:
-#   kubectl apply -f deployment/db-seed-job.yaml
-#   kubectl -n platform-zone logs -f job/db-seed
-#   kubectl -n platform-zone delete -f deployment/db-seed-job.yaml
+# Apply / watch / clean up (pick the overlay matching your deployed tier):
+#   kubectl apply  -k deployment/db-seed/reportable
+#   kubectl -n data-zone logs -f job/db-seed          # -> "db-seed complete"
+#   kubectl delete -k deployment/db-seed/reportable
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: db-seed
-  namespace: platform-zone
 spec:
   backoffLimit: 1
   template:
@@ -33,10 +35,11 @@ spec:
           args:
             - 'for i in $(seq 1 60); do pg_isready -d "$OPERATIONAL_DB_URL" && exit 0; sleep 2; done; echo "db not ready" >&2; exit 1'
           env:
-            - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational.platform-zone.svc.cluster.local:5432/soc_operational"}
-        # 2) download the seed from the bucket subfolder into a shared dir
+            - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational:5432/soc_operational"}
+        # 2) download the seed from the bucket subfolder into a shared dir.
+        #    quay mirror — Docker Hub's minio/mc hits anonymous-pull rate limits.
         - name: fetch-seed
-          image: minio/mc
+          image: quay.io/minio/mc
           command: ["sh", "-c"]
           args:
             - 'mc alias set hs "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" && mc cp --recursive hs/model-storage/db-seed/ /seed/ && ls -la /seed'
@@ -66,7 +69,7 @@ spec:
                 (SELECT count(*) FROM alert_ground_truth) AS ground_truth;"
               echo "db-seed complete"
           env:
-            - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational.platform-zone.svc.cluster.local:5432/soc_operational"}
+            - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational:5432/soc_operational"}
           volumeMounts:
             - {name: seed, mountPath: /seed}
       volumes:

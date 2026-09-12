@@ -1,0 +1,46 @@
+# Public Phoenix exposure — OPT-IN, out-of-band. NOT part of any overlay; apply
+# by hand and delete when done. Two pieces:
+#
+#   1) NetworkPolicy `phoenix-allow-public` — the reportable overlay's
+#      `platform-zone-restrict-ingress` (podSelector {}, from: the 5 zones) DROPS
+#      ingress to Phoenix from anything outside those namespaces, INCLUDING a
+#      node's kube-proxy NodePort DNAT. That is why a bare NodePort returned
+#      nothing even on the master's own localhost. NetworkPolicies are additive
+#      (OR), so this one opens Phoenix ingress from ALL sources. (Harmless on the
+#      minimal overlay, which has no policies.)
+#
+#   2) Service `phoenix-public` (NodePort 30606) — so the Hyperstack master's
+#      public IP can reach the Phoenix UI (the worker running the pod has no
+#      public IP; kube-proxy on the master routes the NodePort to it).
+#
+# REACH IT AT:  http://<MASTER_PUBLIC_IP>:30606
+# REQUIRES: open inbound TCP 30606 to the master in the Hyperstack security
+#           group / firewall (the k8s NodePort alone is not enough).
+#
+# SECURITY: this exposes the trace UI publicly with NO auth (PHOENIX_ENABLE_AUTH
+# is false). Fine for a short dev/inspection window; do not leave it up on a
+# sensitive deployment. Tear down:  kubectl delete -f deployment/phoenix-public.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: phoenix-allow-public
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: phoenix}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: phoenix}
+  policyTypes: [Ingress]
+  ingress:
+    - {}          # allow all ingress to the Phoenix pod (all ports, all sources)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phoenix-public
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: phoenix}
+spec:
+  type: NodePort
+  selector: {app.kubernetes.io/name: phoenix}
+  ports:
+    - {name: http-ui, port: 6006, targetPort: http-otlp, nodePort: 30606}

@@ -1,0 +1,11 @@
+# db-seed for the REPORTABLE tier: the DB lives in data-zone, so the loader runs
+# there. `vllm-s3-creds` must exist in data-zone TOO (vLLM's copy in platform-zone
+# is a different namespace) — create it once:
+#   kubectl -n data-zone create secret generic vllm-s3-creds \
+#     --from-literal=AWS_ACCESS_KEY_ID=<key> --from-literal=AWS_SECRET_ACCESS_KEY=<secret>
+#   kubectl apply -k deployment/db-seed/reportable
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: data-zone
+resources:
+  - ../base

@@ -1,0 +1,9 @@
+# db-seed for the MINIMAL tier: the minimal overlay folds the DB into
+# platform-zone, so the loader runs there. `vllm-s3-creds` must exist in
+# platform-zone (it already does — vLLM uses it).
+#   kubectl apply -k deployment/db-seed/minimal
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: platform-zone
+resources:
+  - ../base

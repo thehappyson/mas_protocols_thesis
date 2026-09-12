@@ -62,10 +62,10 @@ labels:
 images:
   - name: soc-agent
     newName: ghcr.io/thehappyson/soc-agent
-    newTag: 009fc25fda75
+    newTag: 916a52fab587
   - name: soc-tool
     newName: ghcr.io/thehappyson/soc-tool
-    newTag: d7d97ed697cc
+    newTag: 916a52fab587
 
 # Private-registry pull secret, attached to every pod that runs a private image
 # (agent + tool Deployments, and the workload-generator Job). The `ghcr-pull`

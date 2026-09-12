@@ -65,7 +65,7 @@ spec:
                 --max-model-len 32768 \
                 --reasoning-parser qwen3 \
                 --enable-auto-tool-choice \
-                --tool-call-parser hermes \
+                --tool-call-parser qwen3_coder \
                 --trust-remote-code
           ports:
             - {name: http, containerPort: 8000}

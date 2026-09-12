@@ -134,6 +134,8 @@ async def _drive_one(client_factory: ClientFactory, http: httpx.AsyncClient,
         "path": path,
         "disposition": disposition,
         "elapsed": time.time() - started,
+        "n_actions": len(actions),
+        "final_text": (final_text or "")[:1500],
     }
 
 
@@ -142,6 +144,8 @@ async def main() -> int:
     ap.add_argument("--manifest", help="JSONL manifest path (default: stdin)")
     ap.add_argument("--limit", type=int, help="only drive the first N alerts")
     ap.add_argument("--concurrency", type=int, default=3)
+    ap.add_argument("--debug", action="store_true",
+                    help="print the raw Triage result + action count per alert")
     args = ap.parse_args()
 
     src = open(args.manifest) if args.manifest else sys.stdin
@@ -178,7 +182,9 @@ async def main() -> int:
                 results.append(res)
                 print(f"  {res['alert_id']:<24} truth={res['true_class']:<16} "
                       f"path={res['path']:<12} disposition={res['disposition']:<12} "
-                      f"{res['elapsed']:5.1f}s", flush=True)
+                      f"actions={res['n_actions']} {res['elapsed']:5.1f}s", flush=True)
+                if args.debug or res["path"] in ("needs_review", "unknown"):
+                    print(f"      └─ raw Triage result: {res['final_text']!r}\n", flush=True)
 
         await asyncio.gather(*(guarded(a) for a in alerts))
 

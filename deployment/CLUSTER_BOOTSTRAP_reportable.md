@@ -76,15 +76,23 @@ kubectl wait --for=condition=Ready node/${WORKER} --timeout=300s
 ```
 (The helper pod is destroyed when containerd restarts — expected.)
 
-### 3. Secrets (same as minimal — data-zone needs none; Postgres uses its own)
+### 3. Secrets (ghcr-pull for private images; vllm-s3-creds in BOTH platform-zone and data-zone)
+Secrets are namespace-scoped. `vllm-s3-creds` is needed in **platform-zone** (vLLM streams
+the model) **and** in **data-zone** (the Step 7 `db-seed` loader runs there, since reportable
+keeps the DB in data-zone). Create both up front — using the same real creds you export:
 ```bash
 for ns in agent-zone tool-zone experiment-zone; do
   kubectl -n "$ns" create secret docker-registry ghcr-pull \
     --docker-server=ghcr.io --docker-username=thehappyson --docker-password="$GHCR_PAT"
 done
-kubectl -n platform-zone create secret generic vllm-s3-creds \
-  --from-literal=AWS_ACCESS_KEY_ID="$S3_KEY" --from-literal=AWS_SECRET_ACCESS_KEY="$S3_SECRET"
+for ns in platform-zone data-zone; do
+  kubectl -n "$ns" create secret generic vllm-s3-creds \
+    --from-literal=AWS_ACCESS_KEY_ID="$S3_KEY" --from-literal=AWS_SECRET_ACCESS_KEY="$S3_SECRET"
+done
 ```
+> Both must hold REAL, non-empty values — if `$S3_KEY`/`$S3_SECRET` aren't exported in this
+> shell, the secret is created with empty strings and `mc` later fails with `Access Denied`.
+> Verify: `kubectl -n data-zone get secret vllm-s3-creds -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d; echo`
 
 ### 4. Deploy the reportable overlay
 ```bash
@@ -128,24 +136,28 @@ Sanctioned paths are unaffected: tools reach the DB (tool-zone → data-zone all
 and agents reach vLLM:8000 / Phoenix:6006 (platform-zone allows all zones).
 
 ### 7. Load the real dataset + drive the pipeline
-The pipeline is driven over the **real CSE-CIC-IDS2018 dataset** (the synthetic
-workload-generator was dropped). Build the seed + driving manifest and upload the
-seed:
+The pipeline is driven over the **real SIEVE log dataset** (`raw_data/SIEVE_*.csv`;
+the synthetic workload-generator was dropped). Each row is a pre-labelled log event
+whose *category* is the ground truth; `stage_dbs.py` maps it to an alert, rewrites the
+victim to a synthetic CMDB asset (universal hit) and ~40% of attack sources to a seeded
+IOC (partial hit), so the escalate/benign branch is driven by reasoning, not one lookup.
+Build the seed + driving manifest and upload the seed:
 ```bash
+export AWS_ACCESS_KEY_ID=<key>; export AWS_SECRET_ACCESS_KEY=<secret>
 /opt/miniconda3/envs/masterarbeit/bin/python scripts/stage_dbs.py --upload   # → raw_data/staged/seed_*.sql + wl.jsonl, uploads seed
 ```
-Load it into Postgres. Under reportable the DB is in **`data-zone`** and only
-tool/experiment/data may reach it, so run the loader **in `data-zone`** — which
-means the S3 creds secret must exist there too:
+> Full SIEVE is ~600k alerts (`seed_alerts.sql` ~140 MB). For a smaller SIEM store,
+> `stage_dbs.py --limit N` stages a deterministic N-alert sample.
+Load it into Postgres. Under reportable the DB is in **`data-zone`**, so the loader runs
+there (the overlay pins the namespace — no `sed`). This relies on the `vllm-s3-creds`
+secret you created in data-zone in Step 3:
 ```bash
-kubectl -n data-zone create secret generic vllm-s3-creds \
-  --from-literal=AWS_ACCESS_KEY_ID="$S3_KEY" --from-literal=AWS_SECRET_ACCESS_KEY="$S3_SECRET"
-sed 's/platform-zone/data-zone/g' deployment/db-seed-job.yaml | kubectl apply -f -
+kubectl apply -k deployment/db-seed/reportable    # overlay pins ns=data-zone; no sed
 kubectl -n data-zone logs -f job/db-seed            # -> "db-seed complete"
-kubectl -n data-zone delete job db-seed
+kubectl delete -k deployment/db-seed/reportable
 ```
-Drive a mixed sample through the live pipeline (needs vLLM Ready; the real manifest
-has ~12k lines, so sample both classes rather than driving all):
+Drive a mixed sample through the live pipeline (needs vLLM Ready; the manifest has
+~600k lines, so sample both classes rather than driving all):
 ```bash
 kubectl -n agent-zone port-forward svc/triage-agent 9101:9101 &
 grep '"true_class": "escalate"' raw_data/staged/wl.jsonl | head -10  > /tmp/mix.jsonl
@@ -164,10 +176,15 @@ Traces: `kubectl -n platform-zone port-forward svc/phoenix 6006:6006`. Inspect t
 - **db-seed can't reach Postgres / hangs** — the DB is in `data-zone` and the
   policy admits only tool/experiment/data, so the loader must run **in data-zone**
   (step 7 does). Also confirm all 5 namespaces exist and `kubectl -n data-zone get
-  pods` shows Postgres Running. If the seed pod can't pull the S3 files, the
-  `vllm-s3-creds` secret is missing in data-zone (step 7 creates it).
+  pods` shows Postgres Running. If `fetch-seed` fails with `Access Denied`, the
+  data-zone `vllm-s3-creds` secret holds empty/wrong creds — recreate it (step 3)
+  with real, non-empty `$S3_KEY`/`$S3_SECRET`.
 - **`run_workload` gets no response** — vLLM not Ready, or the manifest is empty;
   check `raw_data/staged/wl.jsonl` exists (from `stage_dbs.py`) and sample it.
+- **S3 upload `MissingContentLength`** — boto3/aws-cli ≥ 1.36 default to `aws-chunked`
+  uploads with no `Content-Length`, which Hyperstack rejects. `stage_dbs.py` sets
+  `request_checksum_calculation="when_required"`; for the `aws` CLI export
+  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` + `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required`.
 - **Agent can reach the DB directly (`CONNECTED`)** — CNI not enforcing NetworkPolicy;
   the reportable condition is invalid until fixed.
 - **Inference/tracing broken** — check the platform-zone policy admits agent-zone
