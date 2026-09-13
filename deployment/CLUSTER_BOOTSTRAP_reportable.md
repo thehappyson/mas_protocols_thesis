@@ -165,7 +165,20 @@ grep '"true_class": "benign"'   raw_data/staged/wl.jsonl | head -10 >> /tmp/mix.
 TRIAGE_A2A_ENDPOINT=http://127.0.0.1:9101 \
   /opt/miniconda3/envs/masterarbeit/bin/python scripts/run_workload.py --manifest /tmp/mix.jsonl --concurrency 3
 ```
-Traces: `kubectl -n platform-zone port-forward svc/phoenix 6006:6006`. Inspect the DB:
+Traces (local): `kubectl -n platform-zone port-forward svc/phoenix 6006:6006`.
+
+Traces (public, survives nothing — re-apply after every recreate): the reportable
+overlay's Calico policy drops external ingress to Phoenix, so a bare NodePort is
+dead. `phoenix-public.yaml` adds an allow-all NetworkPolicy + a NodePort. It is
+NOT part of the overlay (it exposes the trace UI with no auth), so apply it by hand:
+```bash
+kubectl apply -f deployment/phoenix-public.yaml
+# then, OUTSIDE k8s (resets on recreate): open inbound TCP 30606 to the master in
+# the Hyperstack security group, and browse http://<MASTER_PUBLIC_IP>:30606
+# tear down when done:  kubectl delete -f deployment/phoenix-public.yaml
+```
+
+Inspect the DB:
 `kubectl -n data-zone exec statefulset/postgres-operational -- psql -U soc -d soc_operational -c '\dt'`.
 > Reloading? `db-seed` COPYs (appends) — TRUNCATE first for a clean reload:
 > `… psql … -c "TRUNCATE alerts, iocs, assets, alert_ground_truth CASCADE;"`.
