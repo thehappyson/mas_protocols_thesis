@@ -96,12 +96,21 @@ spec:
             httpGet: {path: /health, port: http}
             periodSeconds: 20
             failureThreshold: 60         # up to ~20 min to become ready
+          # LOAD TOLERANCE: on a single GPU under concurrent load /health can lag.
+          # The default timeoutSeconds:1 + failureThreshold:3 killed a busy-but-alive
+          # vLLM (graceful exit 0 -> restart -> minutes of re-streaming = agent
+          # `APIConnectionError`s mid-run). Give both probes generous timeouts so
+          # only a genuinely hung server is de-endpointed / restarted.
           readinessProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6          # ~60s of slow /health before de-endpointing
           livenessProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 10         # ~5 min unresponsive before a restart
       volumes:
         - name: dshm
           emptyDir: {medium: Memory, sizeLimit: 8Gi}

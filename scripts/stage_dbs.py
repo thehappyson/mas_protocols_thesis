@@ -31,6 +31,7 @@ Deterministic (SEED). Run:
 from __future__ import annotations
 
 import argparse
+import collections
 import glob
 import json
 import pathlib
@@ -50,16 +51,26 @@ BUCKET_PREFIX = "model-storage/db-seed"        # subfolder in the model bucket
 SEED = 1337                # reproducibility
 N_ASSETS = 300             # CMDB fleet size
 N_IOCS = 60                # known-bad IP pool size
-IOC_COVERAGE = 0.40        # fraction of escalate alerts whose source is a known IOC
+IOC_COVERAGE = 0.40        # fraction of escalate incidents whose source is a known IOC
 BASE_TS = datetime(2025, 1, 1)   # synthetic alert timestamps (SIEVE's own are junk)
 
+# AGGREGATION — the routing signal. A single SIEVE line ("one failed login") is
+# genuinely low-signal, so triage (correctly) dismisses it and the escalate path
+# never runs. We therefore collapse AGG_SIZE same-category attack events into ONE
+# loud incident ("47 failed logins from X to Y"), which reliably escalates. This
+# is a data-prep choice for PREDICTABLE ROUTING (so both protocol paths fire for
+# the measurement), not an attempt at realistic analysis. Benign events stay as
+# single lines (clearly benign) — the escalate/benign split is deliberately easy.
+AGG_SIZE = 20              # attack events per aggregated incident
+
 # The 4 escalate categories (see raw_data/analysis/categories.txt): category ->
-# (severity, rule_name). Every OTHER category is benign/low (normal ops + noise).
+# (severity, rule_name). Rule names reflect the aggregate (repeated/burst) nature.
+# Every OTHER category is benign/low (normal ops + noise), emitted one line = one alert.
 ESCALATE = {
-    "ids-alert":             ("high",   "IDS Alert"),
-    "authentication-failed": ("high",   "Authentication Failure"),
-    "network-filtered":      ("medium", "Firewall Denied Traffic"),
-    "file-action-failure":   ("medium", "File Access Denied"),
+    "ids-alert":             ("high",   "IDS Alert Burst"),
+    "authentication-failed": ("high",   "Repeated Authentication Failures"),
+    "network-filtered":      ("medium", "Repeated Firewall Denials"),
+    "file-action-failure":   ("medium", "Repeated File Access Denials"),
 }
 
 
@@ -180,26 +191,62 @@ def load_events(limit: int | None) -> list[tuple[str, str]]:
 
 def derive(events: list[tuple[str, str]], assets: list[dict], iocs: list[dict],
            ) -> tuple[list[Alert], list[GroundTruth]]:
-    """One alert + one ground-truth row per SIEVE event (see module docstring)."""
+    """Build alerts + agent-invisible ground truth.
+
+    BENIGN categories -> one alert per event (single line, clearly benign).
+    ESCALATE categories -> AGG_SIZE events collapsed into ONE loud incident whose
+    description states the volume, so triage reliably escalates and the enrichment
+    chain runs. Every alert's dest is a CMDB asset (universal hit); ~IOC_COVERAGE of
+    escalate incidents get a known-bad IOC source (downstream corroboration).
+    """
     rng = random.Random(SEED + 1)
-    alerts, gts = [], []
-    for i, (category, log) in enumerate(events):
-        true_class, severity, rule = classify(category)
-        aid = f"evt-{i:06d}"
-        ts = (BASE_TS + timedelta(seconds=i)).isoformat()
-        dest_ip = assets[i % len(assets)]["asset_id"]        # universal CMDB hit
+    alerts: list[Alert] = []
+    gts: list[GroundTruth] = []
+    n = 0  # running index -> alert id, timestamp, asset pick
 
-        if true_class == "escalate" and rng.random() < IOC_COVERAGE:
-            source_ip = rng.choice(iocs)["indicator"]        # known-bad -> IOC hit
-            indicator, verdict, campaign = source_ip, "malicious", f"ti:{source_ip}"
-        else:
-            source_ip = _novel_public_ip(rng)                # novel / unknown source
-            indicator, verdict, campaign = None, None, None
+    def _emit(severity, source_ip, dest_ip, rule, desc, gt_kwargs):
+        nonlocal n
+        aid = f"evt-{n:06d}"
+        ts = (BASE_TS + timedelta(seconds=n)).isoformat()
+        alerts.append(Alert(aid, ts, severity, source_ip, dest_ip, rule, desc))
+        gts.append(GroundTruth(alert_id=aid, **gt_kwargs))
+        n += 1
 
-        alerts.append(Alert(aid, ts, severity, source_ip, dest_ip, rule, log))
-        gts.append(GroundTruth(aid, true_class,
-                               category if true_class == "escalate" else None,
-                               campaign, None, indicator, verdict, dest_ip))
+    # --- benign: one alert per event -----------------------------------------
+    for category, log in events:
+        if classify(category)[0] != "benign":
+            continue
+        _, severity, rule = classify(category)
+        dest_ip = assets[n % len(assets)]["asset_id"]
+        _emit(severity, _novel_public_ip(rng), dest_ip, rule, log,
+              dict(true_class="benign", attack_type=None, campaign_id=None,
+                   stage=None, indicator=None, indicator_verdict=None,
+                   target_asset=dest_ip))
+
+    # --- escalate: aggregate AGG_SIZE same-category events into one incident ---
+    by_cat: dict[str, list[str]] = collections.defaultdict(list)
+    for category, log in events:
+        if classify(category)[0] == "escalate":
+            by_cat[category].append(log)
+
+    for category, logs in by_cat.items():
+        severity, rule = ESCALATE[category]
+        for i in range(0, len(logs), AGG_SIZE):
+            bucket = logs[i:i + AGG_SIZE]
+            dest_ip = assets[n % len(assets)]["asset_id"]
+            if rng.random() < IOC_COVERAGE:
+                source_ip = rng.choice(iocs)["indicator"]
+                indicator, verdict, campaign = source_ip, "malicious", f"ti:{source_ip}"
+            else:
+                source_ip = _novel_public_ip(rng)
+                indicator, verdict, campaign = None, None, None
+            desc = (f"{len(bucket)} {category} events from {source_ip} to {dest_ip} "
+                    f"within a short window (repeated pattern). "
+                    f"Sample event: {bucket[0][:160]}")
+            _emit(severity, source_ip, dest_ip, rule, desc,
+                  dict(true_class="escalate", attack_type=category,
+                       campaign_id=campaign, stage=None, indicator=indicator,
+                       indicator_verdict=verdict, target_asset=dest_ip))
     return alerts, gts
 
 
@@ -275,30 +322,57 @@ def write_manifest(alerts: list[Alert], gts: list[GroundTruth], path: pathlib.Pa
 PART_SIZE = 16 * 1024 * 1024      # 16 MB multipart chunk
 
 
+def _retry(fn, what: str, tries: int = 5):
+    """Call fn(), retrying transient transport errors with exponential backoff.
+    Hyperstack intermittently drops a connection mid-upload (e.g. HTTP 499
+    'client closed request', or a reset), which botocore does not auto-retry."""
+    import time
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — retry any transient transport error
+            if attempt == tries:
+                raise
+            wait = 2 ** attempt
+            print(f"  {what}: attempt {attempt} failed ({e.__class__.__name__}); "
+                  f"retrying in {wait}s", flush=True)
+            time.sleep(wait)
+
+
 def _put_object(s3, bucket: str, key: str, path: pathlib.Path) -> None:
-    """Upload one file to Hyperstack object storage, working around two quirks:
+    """Upload one file to Hyperstack object storage, working around three quirks:
       • it rejects boto3's transfer-manager (streamed aws-chunked, no
         Content-Length) — so we pass each body as BYTES with an explicit length;
       • a single ~140 MB PUT gets the connection dropped — so anything over one
-        part is sent as a manual multipart upload (16 MB parts).
+        part is sent as a manual multipart upload (16 MB parts);
+      • it intermittently drops a part mid-flight (HTTP 499) — so every S3 call
+        is retried with backoff (`_retry`).
     """
     size = path.stat().st_size
     if size <= PART_SIZE:
         data = path.read_bytes()
-        s3.put_object(Bucket=bucket, Key=key, Body=data, ContentLength=len(data))
+        _retry(lambda: s3.put_object(Bucket=bucket, Key=key,
+                                     Body=data, ContentLength=len(data)),
+               f"put {key}")
         return
-    upload_id = s3.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
+    upload_id = _retry(
+        lambda: s3.create_multipart_upload(Bucket=bucket, Key=key),
+        f"create mpu {key}")["UploadId"]
     parts = []
     try:
         with path.open("rb") as fh:
             n = 1
             while (chunk := fh.read(PART_SIZE)):
-                r = s3.upload_part(Bucket=bucket, Key=key, UploadId=upload_id,
-                                   PartNumber=n, Body=chunk, ContentLength=len(chunk))
+                r = _retry(
+                    lambda c=chunk, pn=n: s3.upload_part(
+                        Bucket=bucket, Key=key, UploadId=upload_id,
+                        PartNumber=pn, Body=c, ContentLength=len(c)),
+                    f"part {n} of {key}")
                 parts.append({"ETag": r["ETag"], "PartNumber": n})
                 n += 1
-        s3.complete_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id,
-                                     MultipartUpload={"Parts": parts})
+        _retry(lambda: s3.complete_multipart_upload(
+            Bucket=bucket, Key=key, UploadId=upload_id,
+            MultipartUpload={"Parts": parts}), f"complete mpu {key}")
     except Exception:
         s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
         raise
