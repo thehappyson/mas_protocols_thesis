@@ -1,0 +1,49 @@
+# Attack injector Job — runs experiments/injector.py IN-CLUSTER so V1 attacks carry
+# a real zone/identity (required for A1's L3/L4 test) and their `Attack.*` spans
+# export to Phoenix. Reuses the soc-agent image (already has a2a / mcp / httpx /
+# phoenix.otel); the script is mounted from a ConfigMap, so NO image rebuild — any
+# soc-agent tag works, we only need its deps.
+#
+# Run (create/refresh the ConfigMap from the current script, then apply):
+#   kubectl -n agent-zone create configmap attack-injector \
+#     --from-file=injector.py=experiments/injector.py --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -f experiments/attack-injector-job.yaml
+#   kubectl -n agent-zone logs -f job/attack-injector      # verdict lines + summary
+#   kubectl -n agent-zone delete job attack-injector
+#   # per-attack JSON evidence is under /tmp/injector-out in the pod — `kubectl cp` if needed.
+#
+# KNOBS (edit args below): --scenarios, --config (LABEL the external control state),
+# --token (none at baseline). The pod runs in AGENT-ZONE, so it presents agent-zone
+# identity to control Z. To fire from a different identity/zone later, change
+# `namespace` + pod labels (ATTACKS_AND_INJECTOR.md, knob 1). Treatments are toggled
+# OUTSIDE this Job — it only fires and records the verdict.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: attack-injector
+  namespace: agent-zone
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: attack-injector, zone: agent-zone}
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: injector
+          image: ghcr.io/thehappyson/soc-agent:ed3389bca509   # any soc-agent tag (deps only)
+          command: ["python", "/inj/injector.py"]
+          args:
+            - --scenarios=A1,A2,A3
+            - --config=C0
+            - --out=/tmp/injector-out
+            - --phoenix-otlp=http://phoenix.platform-zone.svc.cluster.local:6006/v1/traces
+            # pg / containment / response targets use the in-cluster DNS defaults baked
+            # into injector.py, so nothing to pass here.
+          volumeMounts:
+            - {name: script, mountPath: /inj}
+      volumes:
+        - name: script
+          configMap: {name: attack-injector}

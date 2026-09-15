@@ -1,5 +1,8 @@
 # =============================================================================
-# soc-testbed — REPORTABLE overlay (the comparable 5-zone tier, policies ON).
+# soc-testbed — REPORTABLE overlay (the comparable 5-zone tier).
+# NOTE: NetworkPolicies (control Z) are OFF by default — see the components block
+# below. Z is out of scope as a reportable finding; toggle it on only for the A1
+# positive control.
 #
 # This is the tier measurements are reported from. It is the FULL base topology
 # unchanged — all five zones kept distinct (agent, tool, platform, data,
@@ -31,8 +34,13 @@ kind: Kustomization
 resources:
   - ../../base
 
-components:
-  - ../../components/network-policies
+# NETWORK ZONING (control Z) IS OFF BY DEFAULT. Network control is out of scope
+# as a reportable finding (A1 is only a harness sanity check — a NetworkPolicy
+# blocking a direct psql connection is near-tautological). The component stays in
+# the tree so Z can be toggled ON for the A1 positive-control run by uncommenting
+# the line below (or `kubectl apply -k components/network-policies` out-of-band).
+# components:
+#   - ../../components/network-policies
 
 labels:
   - includeSelectors: false
