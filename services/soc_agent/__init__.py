@@ -42,6 +42,8 @@ from google.protobuf.json_format import MessageToDict
 from opentelemetry import trace as otel_trace
 from opentelemetry.propagate import extract as otel_extract, inject as otel_inject
 from mcp import Client as MCPClient
+
+from . import capability  # SPIKE: capability-token threading (flag-gated, no-op when off)
 from openai import AsyncOpenAI
 from starlette.applications import Starlette
 
@@ -383,6 +385,8 @@ class LlmToolLoopExecutor(AgentExecutor):
                 span.set_attribute("a2a.parent_task_id", updater.task_id)
             # Carry the trace context to the peer over the A2A message itself.
             _inject_context_into(message)
+            # SPIKE: attenuate the capability for the peer and carry it in metadata.
+            capability.to_a2a_metadata(self._label, label or "peer", message)
 
             async with httpx.AsyncClient(timeout=INFERENCE_TIMEOUT) as http:
                 peer = await create_client(
@@ -509,8 +513,10 @@ class LlmToolLoopExecutor(AgentExecutor):
                             content = veto
                         else:
                             result = await tool_to_client[name].call_tool(
-                                name, arguments
+                                name, arguments,
+                                meta=capability.to_mcp_meta(self._label, name),
                             )
+                            capability.note(self._label, "mcp-egress", name)
                             content = self._tool_result_to_text(result)
                     else:
                         content = f"error: unknown tool {name!r}"
@@ -579,6 +585,13 @@ class LlmToolLoopExecutor(AgentExecutor):
                 span.set_attribute(
                     "workflow.depth", self._workflow.depth(self._agent_name)
                 )
+
+            # SPIKE: read the incoming capability into the task contextvar so the
+            # downstream tool-call/delegate egress points can attenuate + carry it.
+            capability.read_incoming(
+                MessageToDict(context.message.metadata) if context.message.metadata else {})
+            capability.note(self._label, "ingress")
+            capability.annotate_span(span, self._label)
 
             # The task stays in WORKING for the whole loop; each action emits an
             # interim status update from inside _run_tool_loop.
