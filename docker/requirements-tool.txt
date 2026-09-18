@@ -5,3 +5,7 @@ mcp==2.0.0
 uvicorn==0.52.1
 # Postgres driver for the wired data-access seams (operational + audit DBs).
 psycopg2-binary==2.9.10
+# HTTP client for the capability PEP -> PDP calls (services/capability_client.py).
+# NOT transitive: mcp==2.0.0 brings `httpx2`, a different package, so plain httpx
+# must be listed explicitly or every tool server crashes at import.
+httpx==0.28.1
