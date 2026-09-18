@@ -62,9 +62,10 @@ def install_pep(server) -> None:
                 allow, reason = await verify(token, path, server_id)
             if not allow:
                 from mcp.shared.exceptions import MCPError
-                from mcp.types import ErrorData
-                raise MCPError(ErrorData(
-                    code=-32001, message=f"capability token rejected: {reason}"))
+                # This SDK's MCPError takes positional (code, message) — NOT an
+                # ErrorData object. Passing ErrorData raises a TypeError instead of
+                # the rejection, which the caller then sees as a generic harness error.
+                raise MCPError(-32001, f"capability token rejected: {reason}")
         return await call_next(ctx)
 
     server.middleware.append(_pep)
