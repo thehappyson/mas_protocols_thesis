@@ -1,0 +1,61 @@
+# platform-zone / capability-verifier — the PDP for the C (capability-token) control.
+# The reference monitor: the ONLY component that holds `root` + the policy graph;
+# agents and tool servers (PEPs) call it to verify/extend a capability. Stdlib-only
+# (services/capability-verifier/server.py), so it runs on a plain public python image.
+#
+# OPT-IN: this is part of the C treatment. It is NOT in base/kustomization resources;
+# it is applied only for the C1 condition (Step 5 folds it into a capability-tokens
+# component). For a standalone test now:
+#   kubectl -n platform-zone create secret generic capability-root \
+#     --from-literal=root="$(head -c32 /dev/urandom | base64)"
+#   kubectl -n platform-zone create configmap capability-verifier-src \
+#     --from-file=server.py=services/capability-verifier/server.py
+#   kubectl apply -f deployment/base/platform/capability-verifier.yaml
+#   kubectl -n platform-zone port-forward svc/capability-verifier 8080:8080 &
+#   curl -s localhost:8080/mint -d '{"agent":"triage"}'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capability-verifier
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: capability-verifier, zone: platform-zone, tier: platform}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: capability-verifier}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: capability-verifier, zone: platform-zone, tier: platform}
+    spec:
+      containers:
+        - name: pdp
+          image: python:3.12-slim
+          command: ["python", "/pdp/server.py"]
+          env:
+            - {name: PORT, value: "8080"}
+            - name: CAPABILITY_ROOT           # the master secret — PDP only
+              valueFrom: {secretKeyRef: {name: capability-root, key: root}}
+          ports:
+            - {name: http, containerPort: 8080}
+          volumeMounts:
+            - {name: src, mountPath: /pdp}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+      volumes:
+        - name: src
+          configMap: {name: capability-verifier-src}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: capability-verifier
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: capability-verifier, zone: platform-zone, tier: platform}
+spec:
+  selector: {app.kubernetes.io/name: capability-verifier}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

@@ -35,6 +35,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import capability_client  # noqa: E402 (shared PEP, tool image)
 from mcp_db import execute  # noqa: E402  (shared DB helper, tool image)
 
 # Matches the container env convention in deployment/base/tools/ticketing.yaml.
@@ -164,6 +165,8 @@ def update_incident(
     """
     return _write_incident_update(incident_id, status, note)
 
+
+capability_client.install_pep(server)  # C control: verify tools/call at the PDP
 
 if __name__ == "__main__":
     server.run(

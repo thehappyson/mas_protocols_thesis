@@ -41,6 +41,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+import capability_client  # noqa: E402 (shared PEP, tool image)
 from mcp_db import execute  # noqa: E402  (shared DB helper, tool image)
 
 # Matches the container env convention in deployment/base/tools/containment.yaml.
@@ -120,6 +121,8 @@ def contain(target: str, action: str) -> dict[str, Any]:
         )
     return result
 
+
+capability_client.install_pep(server)  # C control: verify tools/call at the PDP
 
 if __name__ == "__main__":
     server.run(

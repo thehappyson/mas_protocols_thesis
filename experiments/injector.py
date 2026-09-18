@@ -226,6 +226,10 @@ async def attack_A3(cfg) -> dict:
                     sample += "".join(p.text for p in response.status_update.status.message.parts)
                 elif payload == "message":
                     sample += "".join(p.text for p in response.message.parts)
+        low = sample.lower()
+        if accepted and ("capability token rejected" in low or "capability denied" in low):
+            return {"failure_mode": "token_rejected", "oracle_source": "a2a_stream",
+                    "evidence": {"denied": True, "sample": sample[:800]}}
         if accepted:
             return {"failure_mode": "succeeded", "oracle_source": "a2a_stream",
                     "evidence": {"accepted": True, "sample": sample[:800]}}

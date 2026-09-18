@@ -192,6 +192,14 @@ def _inject_context_into(message: Message) -> None:
         message.metadata[key] = value
 
 
+def _mcp_server_id(url: str) -> str:
+    """Canonical tool-server id from its MCP endpoint URL, for the capability policy
+    (http://mcp-siem.tool-zone…:7001/mcp -> siem)."""
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").split(".")[0]
+    return host[4:] if host.startswith("mcp-") else host
+
+
 def listen_config(default_port: int) -> tuple[str, int, str]:
     """Standard A2A listen config for an agent, from env with a per-agent port."""
     host = os.environ.get("A2A_LISTEN_HOST", "127.0.0.1")
@@ -385,8 +393,9 @@ class LlmToolLoopExecutor(AgentExecutor):
                 span.set_attribute("a2a.parent_task_id", updater.task_id)
             # Carry the trace context to the peer over the A2A message itself.
             _inject_context_into(message)
-            # SPIKE: attenuate the capability for the peer and carry it in metadata.
-            capability.to_a2a_metadata(self._label, label or "peer", message)
+            # Capability: PDP-attenuate for the peer and carry the new token along.
+            cap_id = getattr(self, "_agent_name", None) or self._label.lower()
+            await capability.to_a2a_metadata(cap_id, label or "peer", message)
 
             async with httpx.AsyncClient(timeout=INFERENCE_TIMEOUT) as http:
                 peer = await create_client(
@@ -422,17 +431,20 @@ class LlmToolLoopExecutor(AgentExecutor):
         ]
         # Per-task scratch space for the gating hooks (see _guard_tool_call).
         state: dict[str, Any] = {}
+        cap_id = getattr(self, "_agent_name", None) or self._label.lower()
 
         async with contextlib.AsyncExitStack() as stack:
             # Open every configured MCP endpoint and aggregate their tools into
             # one menu, remembering which client owns each tool name.
             tool_to_client: dict[str, Any] = {}
+            tool_to_server: dict[str, str] = {}   # tool name -> canonical server id (capability policy)
             tools: list[dict[str, Any]] = []
             for url in self._mcp_endpoints:
                 client = await stack.enter_async_context(MCPClient(url))
                 listed = await client.list_tools()
                 for tool in listed.tools:
                     tool_to_client[tool.name] = client
+                    tool_to_server[tool.name] = _mcp_server_id(url)
                     tools.append(self._to_openai_tool(tool))
             for delegation in self._delegations.values():
                 tools.append(self._delegation_tool(delegation))
@@ -514,9 +526,9 @@ class LlmToolLoopExecutor(AgentExecutor):
                         else:
                             result = await tool_to_client[name].call_tool(
                                 name, arguments,
-                                meta=capability.to_mcp_meta(self._label, name),
+                                meta=await capability.to_mcp_meta(cap_id, tool_to_server.get(name, name)),
                             )
-                            capability.note(self._label, "mcp-egress", name)
+                            capability.note(cap_id, "mcp-egress", tool_to_server.get(name, name))
                             content = self._tool_result_to_text(result)
                     else:
                         content = f"error: unknown tool {name!r}"
@@ -586,12 +598,18 @@ class LlmToolLoopExecutor(AgentExecutor):
                     "workflow.depth", self._workflow.depth(self._agent_name)
                 )
 
-            # SPIKE: read the incoming capability into the task contextvar so the
-            # downstream tool-call/delegate egress points can attenuate + carry it.
+            # Capability (C control): read the incoming token, VERIFY it authorizes
+            # reaching this agent (the A2A PEP), then carry it downstream.
+            cap_id = getattr(self, "_agent_name", None) or self._label.lower()
             capability.read_incoming(
                 MessageToDict(context.message.metadata) if context.message.metadata else {})
-            capability.note(self._label, "ingress")
-            capability.annotate_span(span, self._label)
+            cap_ok, cap_reason = await capability.verify_ingress(cap_id)
+            if not cap_ok:
+                await updater.failed(message=updater.new_agent_message(
+                    [Part(text=f"capability token rejected: {cap_reason}")]))
+                return
+            capability.note(cap_id, "ingress")
+            capability.annotate_span(span, cap_id)
 
             # The task stays in WORKING for the whole loop; each action emits an
             # interim status update from inside _run_tool_loop.

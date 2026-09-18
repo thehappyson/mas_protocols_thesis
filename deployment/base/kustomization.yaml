@@ -62,10 +62,10 @@ labels:
 images:
   - name: soc-agent
     newName: ghcr.io/thehappyson/soc-agent
-    newTag: ed3389bca509
+    newTag: 9c7af714da4a
   - name: soc-tool
     newName: ghcr.io/thehappyson/soc-tool
-    newTag: ed3389bca509
+    newTag: ed3389bca509        # soc-tool unchanged by the spike — keep the last built tag
 
 # Private-registry pull secret, attached to every pod that runs a private image
 # (agent + tool Deployments, and the workload-generator Job). The `ghcr-pull`
