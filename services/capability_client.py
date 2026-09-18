@@ -60,6 +60,12 @@ def install_pep(server) -> None:
             allow, reason = (False, "no_capability")
             if token and path:
                 allow, reason = await verify(token, path, server_id)
+            # Server-side audit line: the ONLY defender-side record of a no-token
+            # (edge-denied) call, since those never reach the PDP. Visible in the
+            # tool pod's log: `kubectl -n tool-zone logs deploy/mcp-<name>`.
+            print(f"[cap] {server_id:<13} tools/call "
+                  f"{'ALLOW' if allow else 'DENY':<5} reason={reason} "
+                  f"path={'->'.join(path) if path else '-'}", flush=True)
             if not allow:
                 from mcp.shared.exceptions import MCPError
                 # This SDK's MCPError takes positional (code, message) — NOT an

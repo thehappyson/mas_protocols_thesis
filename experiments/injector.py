@@ -69,6 +69,16 @@ PENDING = {
 # ---------------------------------------------------------------------------
 # Tracing — Attack.<scenario> spans into the Phoenix project (same as agents)
 # ---------------------------------------------------------------------------
+def _otlp_http_endpoint(endpoint: str) -> str:
+    """Phoenix's `register()` uses the endpoint VERBATIM — it does not append the
+    OTLP path. A bare host:port (e.g. the public NodePort http://IP:30606) then
+    POSTs spans to the Phoenix UI root, which only serves GET -> 405 Method Not
+    Allowed. The HTTP collector lives at /v1/traces on the same port, so normalize
+    to it when a path is missing. (Leaves an explicit /v1/traces untouched.)"""
+    ep = endpoint.rstrip("/")
+    return ep if ep.endswith("/v1/traces") else ep + "/v1/traces"
+
+
 def make_tracer(otlp_endpoint: str, project: str):
     """Return (tracer, provider) or (None, None). Best-effort; a tracing failure
     never blocks an attack."""
@@ -76,8 +86,8 @@ def make_tracer(otlp_endpoint: str, project: str):
         return None, None
     try:
         from phoenix.otel import register
-        provider = register(endpoint=otlp_endpoint, project_name=project,
-                            auto_instrument=False)
+        provider = register(endpoint=_otlp_http_endpoint(otlp_endpoint),
+                            project_name=project, auto_instrument=False)
         return provider.get_tracer("attack-injector"), provider
     except Exception as e:  # noqa: BLE001
         print(f"[tracing] disabled: {type(e).__name__}: {e}", file=sys.stderr)
@@ -275,7 +285,9 @@ async def main() -> int:
     ap.add_argument("--response-a2a", default="http://response-agent.agent-zone.svc.cluster.local:9104/")
     # tracing + output
     ap.add_argument("--phoenix-otlp", default="http://127.0.0.1:6006/v1/traces",
-                    help='OTLP endpoint for Attack.* spans ("" to disable)')
+                    help='OTLP HTTP endpoint for Attack.* spans ("" to disable). '
+                         '/v1/traces is appended if you omit it, so the public '
+                         'NodePort form http://<MASTER_IP>:30606 also works.')
     ap.add_argument("--project", default="soc-testbed")
     ap.add_argument("--out", type=pathlib.Path, default=REPO / "experiments/results")
     ap.add_argument("--run-id", default=None, help="co-locate with an executor run; default injector-<ts>")
@@ -299,6 +311,12 @@ async def main() -> int:
             if span is not None:
                 span.set_attribute("attack.failure_mode", result["failure_mode"])
                 span.set_attribute("attack.oracle_source", result["oracle_source"])
+                span.set_attribute("attack.reportable_verdict",
+                                   result["failure_mode"] in VERDICTS)
+                # The WHY (e.g. "capability token rejected: no_capability"), so the
+                # span alone confirms the outcome without opening the JSON file.
+                span.set_attribute("attack.evidence",
+                                   json.dumps(result["evidence"], default=str)[:1000])
         fname = f"{name}_{VECTOR}_{cfg.config}.json"
         record = {
             "scenario": name, "vector": VECTOR, "config": cfg.config,

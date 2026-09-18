@@ -104,6 +104,24 @@ _ROUTES = {
 }
 
 
+def _audit(route: str, body: dict, result: dict) -> None:
+    """The reference monitor's audit trail: one line per decision to stdout, so
+    `kubectl -n platform-zone logs deploy/capability-verifier` is the authoritative
+    record of every capability decision the PDP is asked to make. NOTE: a call that
+    presents NO token is denied at the edge PEP and never reaches here — its proof
+    is the tool/agent log, not this one."""
+    who = body.get("agent") or "->".join(body.get("path", [])) or "?"
+    target = body.get("target") or body.get("action", {}).get("target", "") or "-"
+    if "allow" in result:                       # /verify
+        verdict, detail = ("ALLOW" if result["allow"] else "DENY"), result.get("reason", "")
+    elif result.get("error"):                   # /mint or /attenuate refused
+        verdict, detail = "DENY", result["error"]
+    else:                                        # /mint or /attenuate issued a token
+        verdict, detail = "ISSUE", "->".join(result.get("path", []))
+    print(f"[pdp] {route:<11} {who:<26} target={target:<13} {verdict:<5} {detail}",
+          flush=True)
+
+
 def _serve(port: int) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -123,7 +141,9 @@ def _serve(port: int) -> None:
                 return
             n = int(self.headers.get("Content-Length", 0) or 0)
             body = json.loads(self.rfile.read(n) or b"{}")
-            self._json(fn(body))
+            result = fn(body)
+            _audit(self.path, body, result)
+            self._json(result)
 
         def do_GET(self) -> None:
             if self.path == "/health":

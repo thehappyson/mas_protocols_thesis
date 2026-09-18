@@ -94,12 +94,41 @@ done
 > shell, the secret is created with empty strings and `mc` later fails with `Access Denied`.
 > Verify: `kubectl -n data-zone get secret vllm-s3-creds -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d; echo`
 
-### 4. Deploy the reportable overlay
+### 3b. Capability-token root — ONLY for the C1 condition (control C-T1)
+Skip this for C0. For **C1**, the PDP (capability-verifier) needs a `capability-root`
+secret in **platform-zone** — the master key it mints/verifies macaroons with. It is
+NOT committed; create it before deploying C1 (else the PDP stays `CreateContainerConfigError`):
 ```bash
+kubectl -n platform-zone create secret generic capability-root \
+  --from-literal=root="$(head -c32 /dev/urandom | base64)"
+```
+> Only the PDP ever reads `root` (agents/tools never see it). Keep it stable across PDP
+> restarts — recreating it invalidates any in-flight token. Rotate = recreate the secret
+> then `kubectl -n platform-zone rollout restart deploy/capability-verifier`.
+
+### 4. Deploy the overlay — C0 (baseline) or C1 (capability tokens)
+The C0/C1 conditions are two standing apply targets; pick one. **C1 = C0 + the
+capability-tokens component** (deploys the PDP, mounts its source, flips
+`CAPABILITY_ENFORCEMENT=true` on every agent + tool). C1 requires step 3b's secret
+**and** images built at a commit that contains the capability code.
+```bash
+# C0 — baseline, no capability layer:
 kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/reportable | kubectl apply -f -
+
+# C1 — capability tokens ON (do step 3b first):
+kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/reportable-c1 | kubectl apply -f -
+```
+```bash
 kubectl get pods -A
 kubectl get networkpolicy -A          # expect 4: agent/tool/data/platform zones
+# C1 only — PDP up + reachable:
+kubectl -n platform-zone rollout status deploy/capability-verifier
+kubectl -n platform-zone get endpoints capability-verifier    # must list an address
 ```
+> **Switching C1 → C0** on a live cluster: re-applying the C0 overlay does NOT remove the
+> enforcement env or the PDP (kustomize apply only adds/updates). Either delete the C1
+> objects first, or just recreate the cluster for a clean condition — the intended A/B is
+> one condition per cluster lifetime, matching the run's `--condition` label.
 
 ### 5. Seed the model — ONLY if the bucket is empty (unchanged; talks to S3)
 ```bash

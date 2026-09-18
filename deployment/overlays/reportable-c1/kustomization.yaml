@@ -1,0 +1,35 @@
+# =============================================================================
+# soc-testbed — REPORTABLE + C1 (capability tokens ON).
+#
+# This is the C1 experimental condition: the reportable tier UNCHANGED, plus the
+# capability-tokens component (control C-T1). It exists as its own overlay so C0
+# and C1 are two standing apply targets you can A/B without editing any file:
+#
+#   C0:  deployment/overlays/reportable
+#   C1:  deployment/overlays/reportable-c1     (this)
+#
+# It layers the component onto reportable (which is itself base + labels, network
+# policies off). Everything the component does — deploy the PDP, mount its source,
+# flip CAPABILITY_ENFORCEMENT on every agent+tool — comes in via that one include.
+#
+# PREREQUISITE: create the `capability-root` secret in platform-zone first
+# (see the component header / bootstrap step 3b), or the PDP won't start.
+#
+# APPLY (load restrictor relaxed — base's initdb files and the PDP source both sit
+# outside their kustomization dirs):
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone \
+#     deployment/overlays/reportable-c1 | kubectl apply -f -
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../reportable
+
+components:
+  - ../../components/capability-tokens
+
+labels:
+  - includeSelectors: false
+    pairs:
+      soc-testbed.io/capability: c1

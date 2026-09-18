@@ -1,0 +1,88 @@
+# =============================================================================
+# capability-tokens (control C-T1) — OPTIONAL Kustomize Component. OFF BY DEFAULT.
+#
+# This is the WHOLE capability-token treatment in one include. Adding it turns the
+# system from C0 (no capability layer) into C1 (PDP-enforced macaroons). It bundles
+# the three things C1 needs so none can be forgotten:
+#
+#   1. the PDP  — deploys capability-verifier (Deployment+Service) into platform-zone
+#                 (base/platform/capability-verifier.yaml). The reference monitor:
+#                 the ONLY holder of `root` + the delegation/tool policy graph.
+#   2. its code — a configMap of services/capability-verifier/server.py mounted at
+#                 /pdp (replaces the manual `kubectl create configmap` from the
+#                 manifest header). disableNameSuffixHash => stable name the pod
+#                 mounts by; bump the PDP with `rollout restart` after editing it.
+#   3. the switch — flips CAPABILITY_ENFORCEMENT=true on EVERY agent (container
+#                 `agent`) and tool (container `server`) pod, so their PEPs go live.
+#                 The PDP endpoint is left at the client default
+#                 (capability-verifier.platform-zone.svc.cluster.local:8080), which
+#                 is exactly the Service this component creates — no override needed.
+#
+# PREREQUISITE — the root secret is NOT in here (secrets aren't committed). Create
+# it in platform-zone BEFORE applying, or the PDP pod stays in CreateContainerConfig:
+#   kubectl -n platform-zone create secret generic capability-root \
+#     --from-literal=root="$(head -c32 /dev/urandom | base64)"
+# The value only matters to the PDP (agents/tools never see root); keep it stable
+# across PDP restarts, or in-flight tokens stop verifying.
+#
+# HOW TO TURN IT ON — two ways, pick one:
+#   * standing C1 target (preferred for A/B runs): overlays/reportable-c1 already
+#     layers this component onto reportable. Deploy that instead of reportable.
+#   * ad hoc: add to an overlay's kustomization.yaml:
+#         components:
+#           - ../../components/capability-tokens
+#
+# LOAD RESTRICTOR: the configMapGenerator reads a file OUTSIDE this dir
+# (services/…), like base/ does with docker/initdb. Render/apply with the
+# restrictor relaxed (the overlays already document this):
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone <overlay> | kubectl apply -f -
+#
+# COMPATIBILITY: this is orthogonal to control Z (network-policies) — they can be
+# combined. It assumes the agent/tool container names from base (`agent`/`server`).
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# (1) the PDP itself — reused verbatim from base (kept out of base/ resources so C0
+# has no capability layer at all).
+resources:
+  - ../../base/platform/capability-verifier.yaml
+
+# (2) the PDP's source, as the configMap the Deployment mounts at /pdp/server.py.
+configMapGenerator:
+  - name: capability-verifier-src
+    namespace: platform-zone
+    files:
+      - server.py=../../../services/capability-verifier/server.py
+generatorOptions:
+  disableNameSuffixHash: true   # stable name; the PDP Deployment mounts it by name
+
+# (3) the switch — enforcement ON for every agent + tool pod. Strategic-merge on
+# `env` merges by name, so existing env vars are preserved and this is appended.
+patches:
+  - target: {kind: Deployment, namespace: agent-zone}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: _ignored_          # the target selector picks the objects
+      spec:
+        template:
+          spec:
+            containers:
+              - name: agent
+                env:
+                  - {name: CAPABILITY_ENFORCEMENT, value: "true"}
+  - target: {kind: Deployment, namespace: tool-zone}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: _ignored_
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                env:
+                  - {name: CAPABILITY_ENFORCEMENT, value: "true"}
