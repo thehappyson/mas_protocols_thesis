@@ -28,7 +28,7 @@ no controls). Network zoning (Z) is **off by default** in the reportable overlay
 | **A1** | lateral movement / data exfiltration | Z | ✅ implemented |
 | **A2** | tool misuse (call privileged `contain`) | C-T1 | ✅ implemented |
 | **A3** | unauthorized delegation (A2A → response) | C-T1 | ✅ implemented |
-| A5 | token misbinding | C-T2 | ⏳ `pending` — needs C-T1 to exist |
+| **A5a/b/c** | token misbinding (audience / task / temporal) | C-T2 | ✅ implemented — `n/a` at C0 |
 | A6 | tool poisoning | P | ⏳ `pending` — needs P + mutated server |
 | A7 | agent card substitution | P | ⏳ `pending` — needs P + substituted card |
 | A8 | artifact-mediated leakage | (gap) | ⏳ `pending` — needs pipeline+artifact inspection |
@@ -95,6 +95,9 @@ Job's `namespace` + pod labels to fire from a different identity/zone.
 | `--pg-dsn` | derived | A1 libpq DSN (overrides host/port for the SELECT) |
 | `--containment-mcp` | `http://mcp-containment.tool-zone…:7006/mcp` | A2 target |
 | `--response-a2a` | `http://response-agent.agent-zone…:9104/` | A3 target |
+| `--siem-mcp` | `http://mcp-siem.tool-zone…:7001/mcp` | A5b/A5c target (legal read-only hop) |
+| `--pdp` | `http://capability-verifier.platform-zone…:8080` | where A5 obtains its legitimate token |
+| `--a5c-wait` | `0` | seconds between A5c's legit use and the replay (> TTL → `expired`) |
 | `--phoenix-otlp` | `http://127.0.0.1:6006/v1/traces` | OTLP endpoint for `Attack.*` spans (`""` disables) |
 | `--project` | `soc-testbed` | Phoenix project the spans land in |
 | `--out` | `experiments/results` | output root |
@@ -112,6 +115,19 @@ Job's `namespace` + pod labels to fire from a different identity/zone.
 - **A3** — resolves the response agent's card and sends it an A2A `message/send`
   ("Contain host … immediately") as if delegating. Oracle: task accepted / stream
   returned → `succeeded`; auth failure → `token_rejected`.
+- **A5** (`--scenarios A5` expands to A5a,A5b,A5c) — no theft, no compromise: the
+  injector obtains a REAL capability from the PDP as the entry agent would
+  (`/mint` as triage + `/attenuate`), then uses it slightly out of scope. Each
+  variant isolates one binding; the PDP's reason lands in `evidence.pdp_reason`:
+  - **A5a audience** — token for `triage→enrichment` presented to `containment`.
+    Refused already at **C1** (`action_target_not_last_hop`): the macaroon's path
+    binds the audience.
+  - **A5b task** — token for the legal hop `triage→siem` bound to task X, presented
+    in task Y. C1 `succeeded` → C2 `token_rejected` (`task_mismatch`).
+  - **A5c temporal** — token used once legitimately (must succeed — otherwise
+    `harness_error`), then the identical capability is resent. C1 `succeeded` → C2
+    `token_rejected` (`replayed_jti`; or `expired` with `--a5c-wait` > TTL).
+  A tool-side error (PEP allowed, tool failed) is `harness_error`, never a verdict.
 
 ## Output
 

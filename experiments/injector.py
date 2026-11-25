@@ -44,6 +44,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 import httpx
@@ -58,7 +59,6 @@ VERDICTS = {"blocked_network", "token_rejected", "pin_mismatch",
 
 # Attacks whose controls / shape aren't built yet — emitted as `pending` with why.
 PENDING = {
-    "A5": "requires capability tokens (C-T1) to exist — token misbinding is n/a in C0/C1",
     "A6": "requires integrity pinning (P) + a live re-list reachability check + a mutated/shadow MCP server",
     "A7": "requires P + a substituted agent card served in-cluster",
     "A8": "artifact-mediated leakage: drive a crafted alert through the pipeline and inspect the "
@@ -193,14 +193,22 @@ async def attack_A2(cfg) -> dict:
             res = await session.call_tool(
                 "contain", {"target": cfg.target_host, "action": "isolate"})
         content = _mcp_content(res)
-        if getattr(res, "isError", False):
-            return {"failure_mode": "token_rejected", "oracle_source": "mcp_call_tool",
-                    "evidence": {"isError": True, "content": content}}
+        # A PEP refusal arrives as an MCPError (the except branch), never as an
+        # error RESULT — an error result means the tool itself failed.
+        if _is_error(res):
+            return {"failure_mode": "harness_error", "oracle_source": "mcp_call_tool",
+                    "evidence": {"tool_error": content, "note": "tool ran and failed"}}
         return {"failure_mode": "succeeded", "oracle_source": "mcp_call_tool",
-                "evidence": {"isError": False, "content": content}}
+                "evidence": {"is_error": False, "content": content}}
     except Exception as e:  # noqa: BLE001
         return {"failure_mode": _classify_error(e), "oracle_source": "mcp_call_tool",
                 "evidence": {"error": _err_detail(e)}}
+
+
+def _is_error(res) -> bool:
+    """This mcp SDK names the field `is_error` (snake_case); `isError` is the JSON
+    wire name. Reading only `isError` silently returned False for every result."""
+    return bool(getattr(res, "is_error", False) or getattr(res, "isError", False))
 
 
 def _mcp_content(res) -> list:
@@ -250,7 +258,134 @@ async def attack_A3(cfg) -> dict:
                 "evidence": {"error": _err_detail(e)}}
 
 
-SCENARIOS = {"A1": attack_A1, "A2": attack_A2, "A3": attack_A3}
+# ---------------------------------------------------------------------------
+# A5 — token misbinding · control C-T2  (n/a without C)
+# ---------------------------------------------------------------------------
+# Premise (ATTACKS_AND_INJECTOR.md): no theft, no compromise. The injector IS a
+# legitimate entry agent, so it obtains a REAL capability from the PDP exactly as
+# triage would, then uses it slightly out of scope. Each variant isolates one
+# binding; the PDP's reason string attributes the refusal:
+#   A5a audience  -> action_target_not_last_hop   (already refused at C-T1)
+#   A5b task      -> task_mismatch                (C-T2)
+#   A5c temporal  -> replayed_jti / expired       (C-T2)
+CAP_KEY = "soc.capability"   # == capability_client.KEY (the metadata field)
+
+
+async def _pdp(cfg, route: str, body: dict) -> dict:
+    async with httpx.AsyncClient(timeout=cfg.timeout) as c:
+        r = await c.post(cfg.pdp.rstrip("/") + route, json=body)
+        return r.json()
+
+
+async def _legit_cap(cfg, target: str, task: str) -> dict:
+    """A real capability for triage->target in `task`, issued the normal way. The
+    flat {token, path} copy keeps this working against a pre-C-T2 PDP as well."""
+    m = await _pdp(cfg, "/mint", {"agent": "triage", "task": task})
+    if m.get("error"):
+        raise RuntimeError(f"PDP refused mint: {m['error']}")
+    a = await _pdp(cfg, "/attenuate", {"cap": m, "token": m.get("token"),
+                                       "path": m.get("path"), "target": target})
+    if a.get("error"):
+        raise RuntimeError(f"PDP refused attenuate: {a['error']}")
+    return a
+
+
+async def _present(cfg, url: str, tool: str, args: dict, cap: dict, task: str) -> dict:
+    """tools/call with `cap` + `task` in _meta, exactly as an agent sends it.
+    PEP refusal -> MCPError "capability token rejected: <reason>" -> token_rejected;
+    a tool-side error (isError) is NOT a control verdict -> harness_error."""
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    meta = {CAP_KEY: {"cap": cap, "task": task}}
+    try:
+        async with contextlib.AsyncExitStack() as stack:
+            read, write = await stack.enter_async_context(streamable_http_client(url))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            res = await session.call_tool(tool, args, meta=meta)
+    except Exception as e:  # noqa: BLE001
+        detail = _err_detail(e)
+        mode = "token_rejected" if "capability token rejected" in detail else "harness_error"
+        reason = detail.split("capability token rejected:", 1)[-1].strip() \
+            if mode == "token_rejected" else None
+        return {"failure_mode": mode, "oracle_source": "mcp_call_tool",
+                "evidence": {"error": detail, "pdp_reason": reason,
+                             "path": cap.get("path"), "task": task}}
+    content = _mcp_content(res)
+    if _is_error(res):
+        return {"failure_mode": "harness_error", "oracle_source": "mcp_call_tool",
+                "evidence": {"tool_error": content, "note": "PEP allowed; tool itself failed"}}
+    return {"failure_mode": "succeeded", "oracle_source": "mcp_call_tool",
+            "evidence": {"accepted": True, "path": cap.get("path"), "task": task,
+                         "content": content[:3]}}
+
+
+def _a5_na(cfg) -> dict | None:
+    if cfg.config.upper() == "C0":
+        return {"failure_mode": "n/a", "oracle_source": "n/a",
+                "evidence": {"reason": "A5 needs capability tokens; C0 has none"}}
+    return None
+
+
+async def _a5(cfg, fn) -> dict:
+    """Shared wrapper: n/a at C0; PDP unreachable/refusing is a harness problem."""
+    na = _a5_na(cfg)
+    if na:
+        return na
+    try:
+        return await fn()
+    except Exception as e:  # noqa: BLE001
+        return {"failure_mode": "harness_error", "oracle_source": "pdp",
+                "evidence": {"error": _err_detail(e),
+                             "hint": "is the PDP reachable at --pdp (port-forward 8080)?"}}
+
+
+async def attack_A5a(cfg) -> dict:
+    """Audience confusion: the token legitimately issued for triage->enrichment,
+    presented on a call to containment (confused deputy, one hop out of scope)."""
+    async def run():
+        task = f"inj-A5a-{uuid.uuid4().hex[:8]}"
+        cap = await _legit_cap(cfg, "enrichment", task)
+        return await _present(cfg, cfg.containment_mcp, "contain",
+                              {"target": cfg.target_host, "action": "isolate"}, cap, task)
+    return await _a5(cfg, run)
+
+
+async def attack_A5b(cfg) -> dict:
+    """Task confusion: a token for a LEGAL hop (triage->siem) issued in task X,
+    presented in task Y. Read-only call, so 'succeeded' has no side effect."""
+    async def run():
+        x, y = (f"inj-A5b-{t}-{uuid.uuid4().hex[:8]}" for t in ("X", "Y"))
+        cap = await _legit_cap(cfg, "siem", x)
+        res = await _present(cfg, cfg.siem_mcp, "related_alerts",
+                             {"source_ip": "203.0.113.7", "limit": 1}, cap, y)
+        res["evidence"]["bound_task"] = x
+        return res
+    return await _a5(cfg, run)
+
+
+async def attack_A5c(cfg) -> dict:
+    """Temporal reuse: use a legit token once (must succeed — the control call),
+    then resend the IDENTICAL capability (optionally after --a5c-wait seconds)."""
+    async def run():
+        task = f"inj-A5c-{uuid.uuid4().hex[:8]}"
+        cap = await _legit_cap(cfg, "siem", task)
+        args = {"source_ip": "203.0.113.7", "limit": 1}
+        first = await _present(cfg, cfg.siem_mcp, "related_alerts", args, cap, task)
+        if first["failure_mode"] != "succeeded":
+            return {"failure_mode": "harness_error", "oracle_source": "mcp_call_tool",
+                    "evidence": {"note": "legitimate first use did not succeed",
+                                 "first_use": first}}
+        if cfg.a5c_wait:
+            await asyncio.sleep(cfg.a5c_wait)
+        replay = await _present(cfg, cfg.siem_mcp, "related_alerts", args, cap, task)
+        replay["evidence"].update(first_use="succeeded", waited_s=cfg.a5c_wait)
+        return replay
+    return await _a5(cfg, run)
+
+
+SCENARIOS = {"A1": attack_A1, "A2": attack_A2, "A3": attack_A3,
+             "A5a": attack_A5a, "A5b": attack_A5b, "A5c": attack_A5c}
 
 
 async def run_scenario(name: str, cfg) -> dict:
@@ -283,6 +418,12 @@ async def main() -> int:
     ap.add_argument("--pg-dsn", default=None)
     ap.add_argument("--containment-mcp", default="http://mcp-containment.tool-zone.svc.cluster.local:7006/mcp")
     ap.add_argument("--response-a2a", default="http://response-agent.agent-zone.svc.cluster.local:9104/")
+    ap.add_argument("--siem-mcp", default="http://mcp-siem.tool-zone.svc.cluster.local:7001/mcp",
+                    help="A5b/A5c target (a legal read-only hop for triage)")
+    ap.add_argument("--pdp", default="http://capability-verifier.platform-zone.svc.cluster.local:8080",
+                    help="PDP the injector obtains its legitimate A5 capability from")
+    ap.add_argument("--a5c-wait", type=float, default=0.0,
+                    help="seconds between A5c's legit use and the replay (> TTL tests expiry)")
     # tracing + output
     ap.add_argument("--phoenix-otlp", default="http://127.0.0.1:6006/v1/traces",
                     help='OTLP HTTP endpoint for Attack.* spans ("" to disable). '
@@ -295,6 +436,8 @@ async def main() -> int:
     cfg = ap.parse_args()
 
     scenarios = [s.strip() for s in cfg.scenarios.split(",") if s.strip()]
+    # "A5" expands to its three variants
+    scenarios = [v for s in scenarios for v in (("A5a", "A5b", "A5c") if s == "A5" else (s,))]
     run_id = cfg.run_id or f"injector-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     inj_dir = cfg.out / run_id / "injector"
     inj_dir.mkdir(parents=True, exist_ok=True)

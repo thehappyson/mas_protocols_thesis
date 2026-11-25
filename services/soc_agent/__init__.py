@@ -603,7 +603,8 @@ class LlmToolLoopExecutor(AgentExecutor):
             cap_id = getattr(self, "_agent_name", None) or self._label.lower()
             capability.read_incoming(
                 MessageToDict(context.message.metadata) if context.message.metadata else {})
-            cap_ok, cap_reason = await capability.verify_ingress(cap_id)
+            # The task binding is the workflow's context_id (propagated by _delegate).
+            cap_ok, cap_reason = await capability.verify_ingress(cap_id, context.context_id)
             if not cap_ok:
                 await updater.failed(message=updater.new_agent_message(
                     [Part(text=f"capability token rejected: {cap_reason}")]))

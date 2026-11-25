@@ -1,0 +1,53 @@
+# =============================================================================
+# soc-testbed — REPORTABLE + C2 (capability tokens, tier C-T2).
+#
+# The C2 experimental condition: reportable-c1 UNCHANGED (PDP, PEPs, enforcement
+# on every agent+tool) with the PDP switched to tier t2. Only the PDP's env differs
+# from C1 — the agents and tools are tier-agnostic (they carry the capability
+# opaquely), so C1 -> C2 is a pure policy change at the reference monitor:
+#
+#   C0:  deployment/overlays/reportable
+#   C1:  deployment/overlays/reportable-c1
+#   C2:  deployment/overlays/reportable-c2     (this)
+#
+# t2 binds each capability to the workflow task (A2A context_id), a task-scoped
+# expiry (CAPABILITY_TTL, inherited down the chain, never extended) and a one-time
+# jti (replay cache). See services/capability-verifier/server.py.
+#
+# CAPABILITY_TTL must exceed the slowest LEGITIMATE pipeline run, or late hops of a
+# long escalation are refused as `expired` (visible as a correctness drop in
+# compare.py). 600 s = ~3x the C0 max alert latency (185 s at count=30,
+# concurrency=2). Raise it if you raise concurrency/count.
+#
+# PREREQUISITE: the `capability-root` secret in platform-zone (bootstrap step 3b).
+#
+# APPLY:
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone \
+#     deployment/overlays/reportable-c2 | kubectl apply -f -
+# =============================================================================
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../reportable-c1
+
+patches:
+  - target: {kind: Deployment, name: capability-verifier, namespace: platform-zone}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: capability-verifier
+      spec:
+        template:
+          spec:
+            containers:
+              - name: pdp
+                env:
+                  - {name: CAPABILITY_TIER, value: "t2"}
+                  - {name: CAPABILITY_TTL, value: "600"}
+
+labels:
+  - includeSelectors: false
+    pairs:
+      soc-testbed.io/capability: c2

@@ -117,7 +117,14 @@ kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/rep
 
 # C1 — capability tokens ON (do step 3b first):
 kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/reportable-c1 | kubectl apply -f -
+
+# C2 — capability tokens, tier C-T2 (= C1 + task binding, TTL, one-time jti; step 3b first):
+kubectl kustomize --load-restrictor LoadRestrictionsNone deployment/overlays/reportable-c2 | kubectl apply -f -
 ```
+> C1 and C2 differ ONLY in the PDP's env (`CAPABILITY_TIER=t2`, `CAPABILITY_TTL`), so
+> C1 → C2 on the same cluster is just a PDP policy change — re-apply the C2 overlay and
+> the verifier restarts with the new tier (in-flight t1 tokens stop validating; start
+> the C2 run after the rollout).
 ```bash
 kubectl get pods -A
 kubectl get networkpolicy -A          # expect 4: agent/tool/data/platform zones

@@ -26,21 +26,24 @@ async def _post(path: str, payload: dict) -> dict:
         return r.json()
 
 
-async def mint(agent: str) -> dict | None:
-    """Entry macaroon for an entry agent -> {token, path}, or None if refused."""
-    d = await _post("/mint", {"agent": agent})
+# The capability (`cap`) is an OPAQUE dict issued by the PDP — {token, path} at
+# C-T1, plus {task, exp, jti} at C-T2. Callers carry it untouched and hand it back;
+# only the PDP interprets it, so a new tier changes the PDP alone.
+async def mint(agent: str, task: str | None = None) -> dict | None:
+    """Entry capability for an entry agent, bound to `task` (C-T2), or None if refused."""
+    d = await _post("/mint", {"agent": agent, "task": task})
     return None if d.get("error") else d
 
 
-async def attenuate(token: str, path: list, target: str) -> dict | None:
-    """Extend the chain one hop -> {token, path}, or None if the edge is illegal."""
-    d = await _post("/attenuate", {"token": token, "path": path, "target": target})
+async def attenuate(cap: dict, target: str) -> dict | None:
+    """Extend the chain one hop -> cap, or None if the edge is illegal/expired."""
+    d = await _post("/attenuate", {"cap": cap, "target": target})
     return None if d.get("error") else d
 
 
-async def verify(token: str, path: list, target: str) -> tuple[bool, str]:
-    """(allow, reason) — the incoming capability authorizes reaching `target`."""
-    d = await _post("/verify", {"token": token, "path": path, "action": {"target": target}})
+async def verify(cap: dict, target: str, task: str | None = None) -> tuple[bool, str]:
+    """(allow, reason) — `cap` authorizes reaching `target` within `task`."""
+    d = await _post("/verify", {"cap": cap, "action": {"target": target, "task": task}})
     return bool(d.get("allow")), str(d.get("reason", ""))
 
 
@@ -54,12 +57,14 @@ def install_pep(server) -> None:
 
     async def _pep(ctx, call_next):
         if ctx.method == "tools/call":
-            cap = (ctx.meta or {}).get(KEY) if ctx.meta else None
-            token = (cap or {}).get("token")
-            path = (cap or {}).get("path")
+            # _meta[KEY] = {"cap": <opaque cap>, "task": <caller's task>}
+            entry = (ctx.meta or {}).get(KEY) if ctx.meta else None
+            entry = entry if isinstance(entry, dict) else {}
+            cap = entry.get("cap") if isinstance(entry.get("cap"), dict) else entry
+            path = cap.get("path")
             allow, reason = (False, "no_capability")
-            if token and path:
-                allow, reason = await verify(token, path, server_id)
+            if cap.get("token") and path:
+                allow, reason = await verify(cap, server_id, entry.get("task"))
             # Server-side audit line: the ONLY defender-side record of a no-token
             # (edge-denied) call, since those never reach the PDP. Visible in the
             # tool pod's log: `kubectl -n tool-zone logs deploy/mcp-<name>`.

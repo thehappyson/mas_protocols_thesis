@@ -9,6 +9,7 @@ the live SOC pipeline and captures EVERYTHING for one run into results/<run_id>/
                     disposition, latency, message count, error (one JSON per line)
     traces/spans.jsonl   Phoenix spans for the run's time window (if reachable)
     network/…       in-cluster network capture (pluggable backend — see design doc)
+    pod_logs/…      kubectl logs for the run window (PDP [pdp] + PEP [cap] evidence)
     summary.json    aggregates + effectiveness vs ground truth
 
 SEPARATION OF CONCERNS: this executor does NOT apply security treatments or
@@ -195,6 +196,46 @@ def capture_network(net_cmd: str | None, out_dir: pathlib.Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 3c. Capture — pod stdout for the run window (the defender-side evidence)
+# ---------------------------------------------------------------------------
+def capture_pod_logs(spec: str | None, start: datetime,
+                     out_dir: pathlib.Path) -> dict:
+    """Pull `kubectl logs` for the run window into pod_logs/<ns>_<deploy>.log.
+
+    This is the ONLY way the ephemeral defender-side evidence survives a cluster
+    teardown: the PDP audit trail (`[pdp]`) and the tool/agent PEP lines (`[cap]`)
+    are container stdout, which `export_traces` does not capture. `spec` is a
+    space/comma list of `ns/deploy` targets (the bare --pod-logs flag defaults to
+    the PDP). Best-effort: a missing kubectl or unreachable cluster is recorded,
+    never fatal — capture failure must not lose the run that already completed."""
+    if not spec:
+        return {"captured": False, "reason": "not requested (pass --pod-logs)"}
+    targets = [t for t in spec.replace(",", " ").split() if t]
+    ld = out_dir / "pod_logs"
+    ld.mkdir(parents=True, exist_ok=True)
+    since = start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    saved, failed = [], []
+    for t in targets:
+        if "/" not in t:
+            failed.append({"target": t, "reason": "expected ns/deploy"})
+            continue
+        ns, deploy = t.split("/", 1)
+        cmd = ["kubectl", "-n", ns, "logs", f"deploy/{deploy}",
+               "--since-time", since, "--tail", "-1", "--prefix"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as e:  # noqa: BLE001 — record, never abort
+            failed.append({"target": t, "reason": f"{type(e).__name__}: {e}"})
+            continue
+        if proc.returncode != 0:
+            failed.append({"target": t, "reason": (proc.stderr or "").strip()[:200]})
+            continue
+        (ld / f"{ns}_{deploy}.log").write_text(proc.stdout)
+        saved.append({"target": t, "lines": proc.stdout.count("\n")})
+    return {"captured": bool(saved), "saved": saved, "failed": failed, "since": since}
+
+
+# ---------------------------------------------------------------------------
 # 4. Summarise — aggregates + effectiveness vs ground truth
 # ---------------------------------------------------------------------------
 _PRED = {"incident": "escalate", "dismissed": "benign", "needs_review": "needs_review"}
@@ -249,6 +290,12 @@ def main() -> int:
     ap.add_argument("--phoenix-endpoint", default="http://127.0.0.1:6006")
     ap.add_argument("--project", default="soc-testbed", help="Phoenix project name")
     ap.add_argument("--network-cmd", default=None, help="shell command to capture in-cluster network flows")
+    ap.add_argument("--pod-logs", nargs="?", const="platform-zone/capability-verifier",
+                    default=None,
+                    help="capture kubectl logs for the run window into pod_logs/. Bare "
+                         "flag grabs the PDP audit trail; or pass a space/comma list of "
+                         "ns/deploy, e.g. 'platform-zone/capability-verifier "
+                         "tool-zone/mcp-containment agent-zone/triage-agent'.")
     ap.add_argument("--no-traces", action="store_true", help="skip Phoenix trace export")
     args = ap.parse_args()
 
@@ -278,6 +325,7 @@ def main() -> int:
     if not args.no_traces:
         traces = export_traces(args.phoenix_endpoint, args.project, start, end, run_dir)
     network = capture_network(args.network_cmd, run_dir)
+    pod_logs = capture_pod_logs(args.pod_logs, start, run_dir)
 
     # --- config + summary ---
     config = {
@@ -290,7 +338,7 @@ def main() -> int:
         "endpoints": {"triage": args.triage_endpoint, "phoenix": args.phoenix_endpoint,
                       "project": args.project},
         "manifest": str(args.manifest),
-        "captures": {"traces": traces, "network": network},
+        "captures": {"traces": traces, "network": network, "pod_logs": pod_logs},
     }
     (run_dir / "config.json").write_text(json.dumps(config, indent=2))
     summary = summarize(results)
@@ -306,6 +354,11 @@ def main() -> int:
     print(f"latency s: {summary['latency_s']}")
     print(f"traces: {'ok' if traces['captured'] else traces.get('reason')}")
     print(f"network: {'ok' if network['captured'] else network.get('reason')}")
+    if pod_logs["captured"]:
+        print(f"pod logs: ok ({len(pod_logs['saved'])} saved"
+              + (f", {len(pod_logs['failed'])} failed" if pod_logs['failed'] else "") + ")")
+    else:
+        print(f"pod logs: {pod_logs.get('reason', pod_logs.get('failed'))}")
     print(f"results dir: {run_dir}")
     print("=" * 60)
     return 0
