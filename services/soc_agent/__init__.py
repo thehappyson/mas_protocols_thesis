@@ -219,6 +219,16 @@ class Delegation:
     action_name: str  # e.g. "delegate_to_enrichment"
     description: str
     endpoint: str
+    # The peer's logical agent id (as in the workflow / the PDP's DELEGATE graph).
+    # The action name is what the LLM calls; the PEER ID is what the capability is
+    # attenuated for. Passing the action name there made the PDP refuse every
+    # LLM-driven delegation ("illegal edge response -> delegate_to_verification").
+    peer: str | None = None
+
+    @property
+    def peer_id(self) -> str:
+        """Explicit `peer`, else the action name minus the `delegate_to_` prefix."""
+        return self.peer or self.action_name.removeprefix("delegate_to_")
 
 
 def build_agent_card(
@@ -509,9 +519,12 @@ class LlmToolLoopExecutor(AgentExecutor):
 
                     if name in self._delegations:
                         request = arguments.get("request", "")
+                        # label = the PEER's agent id (not the action name): it is
+                        # the capability target and the span's peer, exactly like
+                        # the workflow delegations below (label=succ).
                         content = await self._delegate(
                             self._delegations[name].endpoint, request, updater,
-                            label=name,
+                            label=self._delegations[name].peer_id,
                         )
                         # Let a subclass record the verdict for later gating.
                         content = self._on_delegation_result(

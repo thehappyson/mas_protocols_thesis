@@ -1,6 +1,10 @@
 # platform-zone / vllm — the inference endpoint the agents call (OpenAI-compatible
-# /v1 on 8000). Serves Qwen/Qwen3.8-27B on the Hyperstack A100 (80 GB). Replaces
-# the host-Ollama dev endpoint; agents point at it via INFERENCE_ENDPOINT.
+# /v1 on 8000). Serves Qwen/Qwen3.8-27B in BF16 (no quantization) on one Hyperstack
+# GPU: A100 80 GB for the n=30 pilot, H200 141 GB for the n=1000 runs. The manifest
+# is GPU-agnostic — the H200's extra memory simply becomes KV cache (more requests
+# in flight). The GPU is a fixed experimental parameter: every condition that is
+# compared must run on the same GPU type; run_experiment.py records it.
+# Replaces the host-Ollama dev endpoint; agents point at it via INFERENCE_ENDPOINT.
 #
 # MODEL STORAGE — streamed from Hyperstack S3 object storage (CANADA-1) via
 # vLLM's Run:ai Model Streamer, so weights survive cluster deletion (the cluster
@@ -90,7 +94,7 @@ spec:
             limits:
               cpu: "8"
               memory: 64Gi
-              nvidia.com/gpu: 1          # the scheduling signal for the A100
+              nvidia.com/gpu: 1          # the scheduling signal (one A100 / H200)
           # Stream + load takes minutes; wide startup window before liveness bites.
           startupProbe:
             httpGet: {path: /health, port: http}

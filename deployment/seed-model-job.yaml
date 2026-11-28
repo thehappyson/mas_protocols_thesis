@@ -53,20 +53,24 @@ spec:
               du -sh /scratch/Qwen3.8-27B
               echo "symlinks (must be empty):"; find /scratch/Qwen3.8-27B -maxdepth 1 -type l
               test -f /scratch/Qwen3.8-27B/config.json || { echo "ERROR: no config.json downloaded" >&2; exit 1; }
-              echo "== installing mc and uploading to s3://model-storage/Qwen3.8-27B =="
-              curl -sSLo /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc
-              chmod +x /usr/local/bin/mc
-              mc alias set hs "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
-              # --exclude the HF metadata dir; mc does NOT follow symlinks, so if the
-              # download produced symlinks this upload would silently do nothing —
-              # the verify step below fails loudly in that case.
-              mc mirror --overwrite --exclude ".cache/**" /scratch/Qwen3.8-27B hs/model-storage/Qwen3.8-27B
+              echo "== installing the AWS CLI and uploading to s3://model-storage/Qwen3.8-27B =="
+              # AWS CLI v1 from PyPI, PINNED. (The MinIO client used before is gone:
+              # dl.min.io/client/mc/... returns 410 Gone.) Same S3 settings as
+              # scripts/stage_dbs.py: path-style + checksum=when_required (env below).
+              pip install --no-cache-dir "awscli==1.40.0"
+              aws configure set default.s3.addressing_style path
+              # --exclude the HF metadata dir. `aws s3 sync` FOLLOWS symlinks by
+              # default; the verify step below still fails loudly on an empty bucket.
+              aws s3 sync --endpoint-url "$AWS_ENDPOINT_URL" --exclude ".cache/*" /scratch/Qwen3.8-27B s3://model-storage/Qwen3.8-27B/
               echo "== verify remote is non-empty =="
-              mc ls --recursive hs/model-storage/Qwen3.8-27B | tee /scratch/remote.txt
+              aws s3 ls --recursive --endpoint-url "$AWS_ENDPOINT_URL" s3://model-storage/Qwen3.8-27B/ | tee /scratch/remote.txt
               test -s /scratch/remote.txt || { echo "ERROR: bucket empty after mirror (symlinks or wrong path?)" >&2; exit 1; }
               echo "seed complete"
           env:
             - {name: AWS_ENDPOINT_URL, value: "https://ca1.obj.nexgencloud.io"}
+            - {name: AWS_DEFAULT_REGION, value: "us-east-1"}
+            - {name: AWS_REQUEST_CHECKSUM_CALCULATION, value: "when_required"}
+            - {name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: "when_required"}
             # Keep the HF cache + temp on the 120Gi PVC, NOT the node's small
             # ephemeral disk — a 54 GB download to /root/.cache evicts the pod
             # (DiskPressure). This is what made the seed "time out".

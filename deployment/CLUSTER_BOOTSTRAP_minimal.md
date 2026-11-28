@@ -102,9 +102,11 @@ kubectl get pods -A
 
 ### 5. Seed the model — **ONLY if the bucket is empty**
 ```bash
-kubectl -n platform-zone run s3check --rm -it --restart=Never --image=minio/mc \
-  --overrides='{"spec":{"containers":[{"name":"s3check","image":"minio/mc","command":["/bin/sh","-c","mc alias set hs $AWS_ENDPOINT_URL $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY && mc ls hs/model-storage/Qwen3.8-27B"],"env":[{"name":"AWS_ENDPOINT_URL","value":"https://ca1.obj.nexgencloud.io"}],"envFrom":[{"secretRef":{"name":"vllm-s3-creds"}}]}]}}'
+kubectl -n platform-zone run s3check --rm -it --restart=Never --image=public.ecr.aws/aws-cli/aws-cli:2.27.0 \
+  --overrides='{"spec":{"containers":[{"name":"s3check","image":"public.ecr.aws/aws-cli/aws-cli:2.27.0","command":["/bin/sh","-c","aws configure set default.s3.addressing_style path && aws s3 ls --endpoint-url $AWS_ENDPOINT_URL s3://model-storage/Qwen3.8-27B/"],"env":[{"name":"AWS_ENDPOINT_URL","value":"https://ca1.obj.nexgencloud.io"},{"name":"AWS_DEFAULT_REGION","value":"us-east-1"},{"name":"AWS_REQUEST_CHECKSUM_CALCULATION","value":"when_required"},{"name":"AWS_RESPONSE_CHECKSUM_VALIDATION","value":"when_required"}],"envFrom":[{"secretRef":{"name":"vllm-s3-creds"}}]}]}}'
 ```
+> Uses the AWS CLI image (pinned): MinIO removed `minio/mc` from Docker Hub, and
+> `quay.io/minio/mc` is not anonymously pullable any more.
 If it lists `config.json` + `*.safetensors`, skip to step 6. If empty:
 ```bash
 kubectl apply -f deployment/seed-model-job.yaml
@@ -175,3 +177,7 @@ Traces: `kubectl -n platform-zone port-forward svc/phoenix 6006:6006`. Inspect t
   containerd to `/ephemeral`; clear stragglers with
   `kubectl -n platform-zone delete pods --field-selector=status.phase=Failed`.
 - **Immutable Job**: re-run seed/workload jobs with `kubectl -n <ns> delete job <name>` then re-apply.
+- **`phoenix-data` PVC `Pending`**: Phoenix keeps its traces on a PVC (default StorageClass);
+  without one, set `storageClassName` in `base/platform/phoenix.yaml`. On a cluster whose
+  Phoenix predates the PVC, the apply fails with `spec.strategy.rollingUpdate: Forbidden` —
+  once: `kubectl -n platform-zone delete deploy/phoenix`, then re-apply.

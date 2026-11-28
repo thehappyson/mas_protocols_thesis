@@ -141,6 +141,7 @@ def build_executor() -> WorkflowExecutor:
                     "rationale. Always call this before containing."
                 ),
                 endpoint=VERIFICATION_A2A_ENDPOINT,
+                peer="verification",   # capability target = the PDP's agent id
             )
         ],
     )

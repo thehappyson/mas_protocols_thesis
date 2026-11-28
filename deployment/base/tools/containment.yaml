@@ -30,7 +30,7 @@ spec:
             - configMapRef: {name: audit-endpoints}
           resources:
             requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "2", memory: 512Mi}    # 2 CPU: never throttled at high concurrency (would inflate non-LLM s)
 ---
 apiVersion: v1
 kind: Service

@@ -19,9 +19,13 @@ Three knobs (map 1:1 to the three controls, keeping outcomes attributable):
   --token      capability token to present (none at baseline). Governs what C sees.
   payload/target flags   the concrete call per scenario. Governs what P / V2 see.
 
-V1 scope implemented now: A1, A2, A3 (baseline-executable). A5/A6/A7 need controls
-(C-T1 / P) that do not exist yet; A8 needs pipeline+artifact inspection — all
-registered as `pending`. See the build order in ATTACKS_AND_INJECTOR.md.
+V1 scope implemented now: A1, A2, A3 and A5 (= A5a/A5b/A5c, n/a at C0) — 6 verdicts
+per repetition for `--scenarios A1,A2,A3,A5`. A6/A7 need P; A8 needs
+pipeline+artifact inspection — registered as `pending`. See ATTACKS_AND_INJECTOR.md.
+
+Before each repetition a PREFLIGHT checks that every endpoint the chosen
+scenarios need answers; a dead port-forward stops the run (exit 2) instead of
+being recorded as a `harness_error` verdict. `--repeat N` fires the list N times.
 
 Run in-cluster (faithful zone/identity — required for A1) via the Job in
 experiments/attack-injector-job.yaml, or locally against port-forwards, e.g.:
@@ -37,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import contextlib
 import json
 import pathlib
@@ -141,10 +146,22 @@ def _classify_error(e: Exception) -> str:
 # ---------------------------------------------------------------------------
 def attack_A1(cfg) -> dict:
     """Direct TCP/libpq to postgres-operational, bypassing the SIEM tool. A block
-    shows as connection refused/timeout (the Z verdict); reachable + rows = exfil."""
+    shows as connection refused/timeout (the Z verdict); reachable + rows = exfil.
+
+    A name that does not RESOLVE (socket.gaierror — e.g. the in-cluster default
+    host used from a laptop) is a harness problem, not a network block: it says
+    nothing about Z. NOTE: through a port-forward (--pg-host 127.0.0.1) the
+    connection is tunnelled via the API server/kubelet and bypasses NetworkPolicies
+    entirely, so a faithful Z verdict needs the in-cluster Job."""
     try:
         with socket.create_connection((cfg.pg_host, cfg.pg_port), timeout=cfg.timeout):
             pass
+    except socket.gaierror as e:
+        return {"failure_mode": "harness_error", "oracle_source": "tcp_probe",
+                "evidence": {"host": cfg.pg_host, "port": cfg.pg_port,
+                             "error": f"{type(e).__name__}: {e}",
+                             "hint": "host does not resolve here — use --pg-host 127.0.0.1 "
+                                     "--pg-port 15432 with a port-forward, or the in-cluster Job"}}
     except (OSError, socket.timeout) as e:
         return {"failure_mode": "blocked_network", "oracle_source": "tcp_probe",
                 "evidence": {"host": cfg.pg_host, "port": cfg.pg_port,
@@ -227,8 +244,13 @@ async def attack_A3(cfg) -> dict:
     from a2a.client.card_resolver import A2ACardResolver
     from a2a.types import Message, Part, Role, SendMessageRequest
     headers = {"Authorization": f"Bearer {cfg.token}"} if cfg.token else {}
+    # Where the delegation is ACCEPTED (C0) the response agent runs a full LLM turn,
+    # which can go quiet for longer than --timeout; a read timeout mid-stream would
+    # misrecord an accepted attack as harness_error. So the stream gets its own,
+    # longer read timeout (--a3-timeout); connecting still uses --timeout.
+    timeout = httpx.Timeout(cfg.timeout, read=max(cfg.timeout, cfg.a3_timeout))
     try:
-        async with httpx.AsyncClient(timeout=cfg.timeout, headers=headers) as http:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers) as http:
             card = await A2ACardResolver(httpx_client=http, base_url=cfg.response_a2a).get_agent_card()
             for iface in card.supported_interfaces:
                 iface.url = cfg.response_a2a
@@ -388,6 +410,54 @@ SCENARIOS = {"A1": attack_A1, "A2": attack_A2, "A3": attack_A3,
              "A5a": attack_A5a, "A5b": attack_A5b, "A5c": attack_A5c}
 
 
+# Which endpoints each scenario talks to — checked BEFORE firing, so a dead
+# port-forward stops the run with a clear message instead of being recorded as a
+# `harness_error` verdict (which is what happened to both C0 baselines).
+NEEDS = {"A1": ("pg",), "A2": ("containment",), "A3": ("response",),
+         "A5a": ("pdp", "containment"), "A5b": ("pdp", "siem"), "A5c": ("pdp", "siem")}
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+async def preflight(cfg, scenarios: list[str]) -> list[str]:
+    """Return a list of problems (empty = all endpoints answer). Any HTTP status
+    counts as reachable; only transport failures are problems. For A1 against a
+    REAL (non-loopback) host, an unreachable port is the verdict itself, so only
+    name resolution is checked there."""
+    needs: set[str] = set()
+    for s in scenarios:
+        if s.startswith("A5") and cfg.config.upper() == "C0":
+            continue                                    # n/a at C0, nothing contacted
+        needs.update(NEEDS.get(s, ()))
+    urls = {"containment": (cfg.containment_mcp, "port-forward tool-zone svc/mcp-containment 7006"),
+            "response": (cfg.response_a2a.rstrip("/") + "/.well-known/agent-card.json",
+                         "port-forward agent-zone svc/response-agent 9104"),
+            "siem": (cfg.siem_mcp, "port-forward tool-zone svc/mcp-siem 7001"),
+            "pdp": (cfg.pdp, "port-forward platform-zone svc/capability-verifier 8080")}
+    problems = []
+    async with httpx.AsyncClient(timeout=10.0) as h:
+        for key in sorted(needs - {"pg"}):
+            url, hint = urls[key]
+            try:
+                async with h.stream("GET", url):       # headers only — never wait on a body
+                    pass
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{key}: {url} → {type(e).__name__}: {e}  (is the {hint} up?)")
+    if "pg" in needs:
+        try:
+            socket.getaddrinfo(cfg.pg_host, cfg.pg_port)
+        except socket.gaierror as e:
+            problems.append(f"pg: {cfg.pg_host} does not resolve ({e}) — use --pg-host 127.0.0.1 "
+                            "--pg-port 15432 with the postgres port-forward")
+        else:
+            if cfg.pg_host in _LOOPBACK:
+                try:
+                    socket.create_connection((cfg.pg_host, cfg.pg_port), timeout=5).close()
+                except OSError as e:
+                    problems.append(f"pg: {cfg.pg_host}:{cfg.pg_port} → {e}  (is the "
+                                    "port-forward data-zone svc/postgres-operational up?)")
+    return problems
+
+
 async def run_scenario(name: str, cfg) -> dict:
     fn = SCENARIOS.get(name)
     if fn is None:
@@ -433,6 +503,12 @@ async def main() -> int:
     ap.add_argument("--out", type=pathlib.Path, default=REPO / "experiments/results")
     ap.add_argument("--run-id", default=None, help="co-locate with an executor run; default injector-<ts>")
     ap.add_argument("--timeout", type=float, default=30.0)
+    ap.add_argument("--a3-timeout", type=float, default=600.0,
+                    help="read timeout for A3's response stream (an accepted delegation runs an LLM turn)")
+    ap.add_argument("--repeat", type=int, default=1,
+                    help="fire the scenario list N times (files get an _rNN suffix when N > 1)")
+    ap.add_argument("--no-preflight", action="store_true",
+                    help="skip the endpoint check before each repetition")
     cfg = ap.parse_args()
 
     scenarios = [s.strip() for s in cfg.scenarios.split(",") if s.strip()]
@@ -445,44 +521,66 @@ async def main() -> int:
     sha = _git_sha()
 
     print(f"run_id={run_id}  config={cfg.config}  identity={cfg.identity}  "
-          f"token={'yes' if cfg.token else 'none'}\nscenarios: {scenarios}\n")
+          f"token={'yes' if cfg.token else 'none'}  repeat={cfg.repeat}\nscenarios: {scenarios}\n")
 
-    records = []
-    for name in scenarios:
-        with attack_span(tracer, name, cfg.config, cfg.identity) as span:
-            result = await run_scenario(name, cfg)
-            if span is not None:
-                span.set_attribute("attack.failure_mode", result["failure_mode"])
-                span.set_attribute("attack.oracle_source", result["oracle_source"])
-                span.set_attribute("attack.reportable_verdict",
-                                   result["failure_mode"] in VERDICTS)
-                # The WHY (e.g. "capability token rejected: no_capability"), so the
-                # span alone confirms the outcome without opening the JSON file.
-                span.set_attribute("attack.evidence",
-                                   json.dumps(result["evidence"], default=str)[:1000])
-        fname = f"{name}_{VECTOR}_{cfg.config}.json"
-        record = {
-            "scenario": name, "vector": VECTOR, "config": cfg.config,
-            "failure_mode": result["failure_mode"],
-            "reportable_verdict": result["failure_mode"] in VERDICTS,
-            "oracle_source": result["oracle_source"],
-            "evidence_ref": f"results/{run_id}/injector/{fname}",
-            "identity": cfg.identity, "token_present": bool(cfg.token),
-            "git_sha": sha, "ts": datetime.now(timezone.utc).isoformat(),
-            "evidence": result["evidence"],
-        }
-        (inj_dir / fname).write_text(json.dumps(record, indent=2, default=str))
-        records.append(record)
-        print(f"  {name:<3} {VECTOR}  {cfg.config:<4} -> {result['failure_mode']:<22} "
-              f"({result['oracle_source']})")
+    records, aborted = [], None
+    for rep in range(1, cfg.repeat + 1):
+        if not cfg.no_preflight:
+            problems = await preflight(cfg, scenarios)
+            if problems:
+                aborted = problems
+                break
+        if cfg.repeat > 1:
+            print(f"-- repetition {rep}/{cfg.repeat}")
+        for name in scenarios:
+            with attack_span(tracer, name, cfg.config, cfg.identity) as span:
+                result = await run_scenario(name, cfg)
+                if span is not None:
+                    span.set_attribute("attack.failure_mode", result["failure_mode"])
+                    span.set_attribute("attack.oracle_source", result["oracle_source"])
+                    span.set_attribute("attack.reportable_verdict",
+                                       result["failure_mode"] in VERDICTS)
+                    span.set_attribute("attack.repeat", rep)
+                    # The WHY (e.g. "capability token rejected: no_capability"), so the
+                    # span alone confirms the outcome without opening the JSON file.
+                    span.set_attribute("attack.evidence",
+                                       json.dumps(result["evidence"], default=str)[:1000])
+            suffix = f"_r{rep:02d}" if cfg.repeat > 1 else ""
+            fname = f"{name}_{VECTOR}_{cfg.config}{suffix}.json"
+            record = {
+                "scenario": name, "vector": VECTOR, "config": cfg.config, "repeat": rep,
+                "failure_mode": result["failure_mode"],
+                "reportable_verdict": result["failure_mode"] in VERDICTS,
+                "oracle_source": result["oracle_source"],
+                "evidence_ref": f"results/{run_id}/injector/{fname}",
+                "identity": cfg.identity, "token_present": bool(cfg.token),
+                "git_sha": sha, "ts": datetime.now(timezone.utc).isoformat(),
+                "evidence": result["evidence"],
+            }
+            (inj_dir / fname).write_text(json.dumps(record, indent=2, default=str))
+            records.append(record)
+            print(f"  {name:<3} {VECTOR}  {cfg.config:<4} -> {result['failure_mode']:<22} "
+                  f"({result['oracle_source']})")
 
     if provider is not None:
         with contextlib.suppress(Exception):
             provider.force_flush()
 
     (cfg.out / run_id / "injector" / "_summary.json").write_text(
-        json.dumps({"run_id": run_id, "config": cfg.config, "records": records}, indent=2, default=str))
+        json.dumps({"run_id": run_id, "config": cfg.config, "repeat": cfg.repeat,
+                    "aborted": aborted, "records": records}, indent=2, default=str))
+    tally: dict[str, collections.Counter] = {}
+    for r in records:
+        tally.setdefault(r["scenario"], collections.Counter())[r["failure_mode"]] += 1
     print(f"\nwrote {len(records)} verdict(s) to {inj_dir}")
+    for name, c in tally.items():
+        print(f"  {name:<4} " + ", ".join(f"{m} {k}/{sum(c.values())}" for m, k in c.most_common()))
+    if aborted:
+        print("\n✗ preflight failed — stopped before firing"
+              + (f" (after {len(records)} verdicts)" if records else "") + ":", file=sys.stderr)
+        for p in aborted:
+            print(f"  - {p}", file=sys.stderr)
+        return 2
     return 0
 
 

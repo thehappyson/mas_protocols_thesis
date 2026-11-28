@@ -37,14 +37,20 @@ spec:
           env:
             - {name: OPERATIONAL_DB_URL, value: "postgresql://soc:soc@postgres-operational:5432/soc_operational"}
         # 2) download the seed from the bucket subfolder into a shared dir.
-        #    quay mirror — Docker Hub's minio/mc hits anonymous-pull rate limits.
+        #    AWS CLI from public ECR, PINNED. (MinIO removed minio/mc from Docker Hub;
+        #    quay.io/minio/mc is no longer anonymously pullable -> 401 ImagePullBackOff.)
+        #    Same S3 settings as scripts/stage_dbs.py, which uploads the seed:
+        #    path-style addressing + checksum=when_required (Hyperstack object storage).
         - name: fetch-seed
-          image: quay.io/minio/mc
+          image: public.ecr.aws/aws-cli/aws-cli:2.27.0
           command: ["sh", "-c"]
           args:
-            - 'mc alias set hs "$AWS_ENDPOINT_URL" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" && mc cp --recursive hs/model-storage/db-seed/ /seed/ && ls -la /seed'
+            - 'aws configure set default.s3.addressing_style path && aws s3 cp --recursive --endpoint-url "$AWS_ENDPOINT_URL" s3://model-storage/db-seed/ /seed/ && ls -la /seed'
           env:
             - {name: AWS_ENDPOINT_URL, value: "https://ca1.obj.nexgencloud.io"}
+            - {name: AWS_DEFAULT_REGION, value: "us-east-1"}
+            - {name: AWS_REQUEST_CHECKSUM_CALCULATION, value: "when_required"}
+            - {name: AWS_RESPONSE_CHECKSUM_VALIDATION, value: "when_required"}
           envFrom:
             - secretRef: {name: vllm-s3-creds}   # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
           volumeMounts:

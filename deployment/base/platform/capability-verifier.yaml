@@ -42,9 +42,13 @@ spec:
           readinessProbe:
             httpGet: {path: /health, port: http}
             periodSeconds: 5
+          # The PDP sits on every hop's critical path: at concurrency 32-64 a
+          # 250m limit throttles it, and the throttling shows up as non-LLM time —
+          # i.e. it would be measured as the control's own overhead. 2 CPU (the
+          # GIL caps one Python process at ~1 core anyway) removes that artefact.
           resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: 250m, memory: 128Mi}
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: "2", memory: 256Mi}
       volumes:
         - name: src
           configMap: {name: capability-verifier-src}

@@ -2,7 +2,27 @@
 # to (OTLP/HTTP 6006, OTLP/gRPC 4317; 6006 also serves the UI). This is the real
 # current observability component; the scaffold's otel-collector.yaml is kept as
 # a FUTURE alternative but not built by base.
-# TODO: pin the image tag (…:latest below); traces are ephemeral (no PVC), as in compose.
+#
+# IMAGE PINNED: `version-22.1.0` is the digest `:latest` pointed to on 2026-11-26
+# (sha256:431274c2…), i.e. what the current clusters already pulled. Unpinned,
+# every recreated cluster could pull a different Phoenix. Change deliberately.
+#
+# STORAGE: SQLite in PHOENIX_WORKING_DIR on a PVC, so an OOM-kill / pod restart
+# mid-run no longer loses the run's traces before run_experiment.py exports them
+# (n = 1000 ≈ 26k spans per condition). The PVC still dies with the cluster —
+# the executor's export (traces/spans.jsonl) is the durable copy.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: phoenix-data
+  namespace: platform-zone
+  labels: {app.kubernetes.io/name: phoenix, zone: platform-zone, tier: platform}
+spec:
+  accessModes: [ReadWriteOnce]
+  # storageClassName: default class, same as the Postgres volumeClaimTemplates
+  resources:
+    requests: {storage: 20Gi}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,15 +31,17 @@ metadata:
   labels: {app.kubernetes.io/name: phoenix, zone: platform-zone, tier: platform}
 spec:
   replicas: 1
+  strategy: {type: Recreate}           # RWO volume: never two pods at once
   selector:
     matchLabels: {app.kubernetes.io/name: phoenix}
   template:
     metadata:
       labels: {app.kubernetes.io/name: phoenix, zone: platform-zone, tier: platform}
     spec:
+      securityContext: {fsGroup: 65532}  # writable PVC also for the -nonroot image variant
       containers:
         - name: phoenix
-          image: arizephoenix/phoenix:latest
+          image: arizephoenix/phoenix:version-22.1.0
           ports:
             - {name: http-otlp, containerPort: 6006}
             - {name: grpc-otlp, containerPort: 4317}
@@ -28,9 +50,15 @@ spec:
             - {name: PHOENIX_GRPC_PORT, value: "4317"}
             - {name: PHOENIX_ENABLE_AUTH, value: "false"}
             - {name: PHOENIX_TELEMETRY_ENABLED, value: "false"}
+            - {name: PHOENIX_WORKING_DIR, value: /mnt/data}
+          volumeMounts:
+            - {name: data, mountPath: /mnt/data}
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
-            limits: {cpu: "1", memory: 2Gi}
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "2", memory: 8Gi}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: phoenix-data}
 ---
 apiVersion: v1
 kind: Service
